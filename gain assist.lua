@@ -75,6 +75,14 @@ end
 local function dBToLinear(dB) return 10^(dB/20) end
 local function linearTodB(linear) if linear <= 0.00001 then return -150 end return 20 * math.log10(linear) end
 
+-- Helper function to detect channel count from source
+local function getSourceChannelCount(take)
+  local src = reaper.GetMediaItemTake_Source(take)
+  if not src then return 1 end
+  local numChannels = reaper.GetMediaSourceNumChannels(src)
+  return math.max(1, numChannels)
+end
+
 -- ===== Audio accessor mgmt =====
 local audioAccessors, audioBuffers = {}, {}
 
@@ -117,17 +125,23 @@ local function getRMSLevels(take, item)
   local windowSize = 0.1
   local numWindows = math.max(0, math.floor(itemLen / windowSize))
   local levels = {}
+  local numChannels = getSourceChannelCount(take)
 
   for i = 0, numWindows - 1 do
     local readTime = aaStart + (i * windowSize)
     local numSamples = math.floor(samplerate * windowSize)
     if numSamples > 0 and numSamples <= 1000000 then
-      local buf = getAudioBuffer(take, numSamples * 2); buf.clear()
-      local read = reaper.GetAudioAccessorSamples(aa, samplerate, 1, readTime, numSamples, buf)
+      local buf = getAudioBuffer(take, numSamples * numChannels * 2)
+      buf.clear()
+      local read = reaper.GetAudioAccessorSamples(aa, samplerate, numChannels, readTime, numSamples, buf)
       if read > 0 then
         local sum, t = 0, buf.table()
-        for j = 1, #t do local s = t[j]; sum = sum + s*s end
-        levels[i+1] = math.sqrt(sum / #t)
+        local sampleCount = math.min(read * numChannels, #t)
+        for j = 1, sampleCount do
+          local s = t[j]
+          sum = sum + s * s
+        end
+        levels[i+1] = math.sqrt(sum / sampleCount)
       else
         levels[i+1] = 0
       end
@@ -257,16 +271,21 @@ local function getRawWaveform(item, numSamples)
 
   local data = {}
   local windowSize = itemLen / numSamples
+  local numChannels = getSourceChannelCount(take)
+
   for i = 0, numSamples - 1 do
     local readTime = aaStart + (i * windowSize)
     local numSamps = math.min(math.floor(samplerate * windowSize), 1000000)
-    if numSamps <= 0 then data[i+1] = {pos=0, neg=0}
+    if numSamps <= 0 then
+      data[i+1] = {pos=0, neg=0}
     else
-      local buf = getAudioBuffer(take, numSamps * 2); buf.clear()
-      local read = reaper.GetAudioAccessorSamples(aa, samplerate, 1, readTime, numSamps, buf)
+      local buf = getAudioBuffer(take, numSamps * numChannels * 2)
+      buf.clear()
+      local read = reaper.GetAudioAccessorSamples(aa, samplerate, numChannels, readTime, numSamps, buf)
       if read > 0 then
         local pos, neg, t = 0, 0, buf.table()
-        for j = 1, #t do
+        local sampleCount = math.min(read * numChannels, #t)
+        for j = 1, sampleCount do
           local s = t[j] * itemVolume
           if s > pos then pos = s end
           if s < neg then neg = s end
@@ -294,14 +313,17 @@ local function getAdjustedWaveform(item, numSamples, phrases, adjustments, peakC
   local peakLin = peakCeiling < 0 and dBToLinear(peakCeiling) or math.huge
   local trimLin = dBToLinear(trim)
   local windowSize = itemLen / numSamples
+  local numChannels = getSourceChannelCount(take)
 
   for i = 0, numSamples - 1 do
     local readTime = aaStart + (i * windowSize)
     local numSamps = math.min(math.floor(samplerate * windowSize), 1000000)
-    if numSamps <= 0 then data[i+1] = {pos=0, neg=0}
+    if numSamps <= 0 then
+      data[i+1] = {pos=0, neg=0}
     else
-      local buf = getAudioBuffer(take, numSamps * 2); buf.clear()
-      local read = reaper.GetAudioAccessorSamples(aa, samplerate, 1, readTime, numSamps, buf)
+      local buf = getAudioBuffer(take, numSamps * numChannels * 2)
+      buf.clear()
+      local read = reaper.GetAudioAccessorSamples(aa, samplerate, numChannels, readTime, numSamps, buf)
       if read > 0 then
         local itemTime = (readTime - aaStart)
         local volAdj = 1.0
@@ -309,7 +331,8 @@ local function getAdjustedWaveform(item, numSamples, phrases, adjustments, peakC
           if itemTime >= ph.startTime and itemTime <= ph.endTime then volAdj = volAdj * a; break end
         end
         local pos, neg, t = 0, 0, buf.table()
-        for j = 1, #t do
+        local sampleCount = math.min(read * numChannels, #t)
+        for j = 1, sampleCount do
           local s = t[j] * itemVolume * volAdj
           if math.abs(s) > peakLin then s = s > 0 and peakLin or -peakLin end
           s = s * trimLin
@@ -569,7 +592,10 @@ local function applyToItem(item, phrases, adjustments, peakCeiling, trim, preLim
         if tRel >= ph.startTime and tRel <= ph.endTime then volAdj = volAdj * a; break end
       end
       local peak, t = 0, buf.table()
-      for j = 1, #t do local s = math.abs(t[j]); if s > peak then peak = s end end
+      for j = 1, #t do 
+        local s = math.abs(t[j] * itemVolume)  -- Apply item volume to the sample
+        if s > peak then peak = s end 
+      end
       local final = volAdj
       if peak * volAdj > peakLin then final = peakLin / peak end
       final = final * trimLin
