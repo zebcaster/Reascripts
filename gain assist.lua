@@ -830,7 +830,7 @@ local function loop()
 
     -- Check total window size at the start
     local winW, winH = reaper.ImGui_GetWindowSize(ctx)
-    if winH < 500 then
+    if winH < 400 then
       local availW, availH = reaper.ImGui_GetContentRegionAvail(ctx)
       local msg = "Window too small - please increase height"
       local textW = reaper.ImGui_CalcTextSize(ctx, msg)
@@ -838,7 +838,7 @@ local function loop()
       reaper.ImGui_SameLine(ctx)
       reaper.ImGui_Text(ctx, msg)
       reaper.ImGui_End(ctx)
-    elseif winW < 600 then  -- Add minimum width check
+    elseif winW < 400 then  -- Add minimum width check
       local availW, availH = reaper.ImGui_GetContentRegionAvail(ctx)
       local msg = "Window too small - please increase width"
       local textW = reaper.ImGui_CalcTextSize(ctx, msg)
@@ -1283,9 +1283,9 @@ local function loop()
         end
       end
 
-      reaper.ImGui_Spacing(ctx)
-      reaper.ImGui_Separator(ctx)
-      reaper.ImGui_Spacing(ctx)
+     --reaper.ImGui_Spacing(ctx)
+     --reaper.ImGui_Separator(ctx)
+     --reaper.ImGui_Spacing(ctx)
 
       -- ===== Waveform draw & interactions =====
       if waveformData and #waveformData > 0 then
