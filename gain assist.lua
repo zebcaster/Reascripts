@@ -24,6 +24,13 @@ local DEFAULT_RESOLUTION_MS = 50
 local DEFAULT_REDUCE_POINTS = true
 local DEFAULT_RAW_WAVEFORM_OPACITY = 30
 
+-- NEW: Gate defaults
+local DEFAULT_GATE_ENABLED = false
+local DEFAULT_GATE_THRESHOLD = -40
+local DEFAULT_GATE_HOLD_TIME = 0.3
+local DEFAULT_GATE_REDUCTION = -60
+local DEFAULT_GATE_ONSET_TIME = 0.04
+
 -- Debug toggle (unchanged behavior)
 local showDebug = false
 local function debugMsg(msg) if showDebug then reaper.ShowConsoleMsg(msg) end end
@@ -56,10 +63,15 @@ local function loadSettings()
   local showDisplaySettings = getExtState("showDisplaySettings", 0) == 1
   local rawWaveformOpacity = getExtState("rawWaveformOpacity", DEFAULT_RAW_WAVEFORM_OPACITY)
   local showTooltips = getExtState("showTooltips", 1) == 1
-  return peakCeiling, correctionStrength, separationSensitivity, trim, preLimitBoost, numBars, minDB, maxDB, curvePower, resolutionMs, reducePoints, showDisplaySettings, rawWaveformOpacity, showTooltips
+  local gateEnabled = getExtState("gateEnabled", DEFAULT_GATE_ENABLED and 1 or 0) == 1
+  local gateThreshold = getExtState("gateThreshold", DEFAULT_GATE_THRESHOLD)
+  local gateHoldTime = getExtState("gateHoldTime", DEFAULT_GATE_HOLD_TIME)
+  local gateReduction = getExtState("gateReduction", DEFAULT_GATE_REDUCTION)
+  local gateOnsetTime = getExtState("gateOnsetTime", DEFAULT_GATE_ONSET_TIME)
+  return peakCeiling, correctionStrength, separationSensitivity, trim, preLimitBoost, numBars, minDB, maxDB, curvePower, resolutionMs, reducePoints, showDisplaySettings, rawWaveformOpacity, showTooltips, gateEnabled, gateThreshold, gateHoldTime, gateReduction, gateOnsetTime
 end
 
-local function saveSettings(peakCeiling, correctionStrength, separationSensitivity, trim, preLimitBoost, resolutionMs, reducePoints, rawWaveformOpacity, showTooltips)
+local function saveSettings(peakCeiling, correctionStrength, separationSensitivity, trim, preLimitBoost, resolutionMs, reducePoints, rawWaveformOpacity, showTooltips, gateEnabled, gateThreshold, gateHoldTime, gateReduction, gateOnsetTime)
   setExtState("peakCeiling", peakCeiling)
   setExtState("correctionStrength", correctionStrength)
   setExtState("separationSensitivity", separationSensitivity)
@@ -69,11 +81,24 @@ local function saveSettings(peakCeiling, correctionStrength, separationSensitivi
   setExtState("reducePoints", 1)
   setExtState("rawWaveformOpacity", rawWaveformOpacity)
   setExtState("showTooltips", showTooltips and 1 or 0)
+  setExtState("gateEnabled", gateEnabled and 1 or 0)
+  setExtState("gateThreshold", gateThreshold)
+  setExtState("gateHoldTime", gateHoldTime)
+  setExtState("gateReduction", gateReduction)
+  setExtState("gateOnsetTime", gateOnsetTime)
 end
 
 -- Conversion
-local function dBToLinear(dB) return 10^(dB/20) end
-local function linearTodB(linear) if linear <= 0.00001 then return -150 end return 20 * math.log10(linear) end
+local function dBToLinear(dB) 
+  if not dB or dB ~= dB then return 1.0 end  -- Handle nil and NaN
+  return 10^(dB/20) 
+end
+
+local function linearTodB(linear) 
+  if not linear or linear ~= linear then return -150 end  -- Handle nil and NaN
+  if linear <= 0.00001 then return -150 end 
+  return 20 * math.log10(linear) 
+end
 
 -- Helper function to detect channel count from source
 local function getSourceChannelCount(take)
@@ -224,6 +249,77 @@ local function detectPhrases(take, item, separationSensitivity)
   return phrases, dt
 end
 
+-- ===== NEW: Gate envelope generation =====
+local function generateGateEnvelope(take, item, gateThreshold, gateHoldTime, gateReduction, gateOnsetTime)
+  local aa, aaStart, aaEnd, samplerate, itemLen = get_accessor_bounds(take)
+  if not aa or samplerate <= 0 or itemLen <= 0 then return nil end
+
+  local gatePoints = {}
+  local windowSize = 0.01
+  local numWindows = math.ceil(itemLen / windowSize)
+  local numChannels = getSourceChannelCount(take)
+  local thresholdLin = dBToLinear(gateThreshold)
+  local reductionLin = dBToLinear(gateReduction)
+  
+  local gateState = false
+  local gateOffTime = nil
+  
+  for i = 1, numWindows do
+    local readTime = aaStart + (i - 1) * windowSize
+    local numSamples = math.min(math.floor(samplerate * windowSize), 100000)
+    
+    if numSamples > 0 then
+      local buf = getAudioBuffer(take, numSamples * numChannels * 2)
+      buf.clear()
+      local read = reaper.GetAudioAccessorSamples(aa, samplerate, numChannels, readTime, numSamples, buf)
+      
+      local maxLevel = 0
+      if read > 0 then
+        local t = buf.table()
+        local sampleCount = math.min(read * numChannels, #t)
+        for j = 1, sampleCount do
+          local s = math.abs(t[j])
+          if s > maxLevel then maxLevel = s end
+        end
+      end
+      
+      local itemTime = (readTime - aaStart)
+      
+      if maxLevel > thresholdLin then
+        gateState = true
+        gateOffTime = nil
+      else
+        if gateState and not gateOffTime then
+          gateOffTime = itemTime
+        end
+      end
+      
+      local reduction = 1.0
+      if gateState then
+        if gateOffTime then
+          local timeSinceOff = itemTime - gateOffTime
+          if timeSinceOff < gateOnsetTime then
+            local fadeProgress = timeSinceOff / gateOnsetTime
+            reduction = 1.0 + (reductionLin - 1.0) * fadeProgress
+          elseif timeSinceOff < gateHoldTime then
+            reduction = reductionLin
+          else
+            gateState = false
+            gateOffTime = nil
+            reduction = 1.0
+          end
+        end
+      else
+        reduction = 1.0
+      end
+      
+      gatePoints[i] = {time = itemTime, reduction = reduction}
+    end
+  end
+  
+  return gatePoints
+end
+
 -- Adjustments
 local function calculateVolumeAdjustments(phrases, correctionStrength, preLimitBoost)
   if not phrases or #phrases == 0 then return {} end
@@ -238,8 +334,9 @@ local function calculateVolumeAdjustments(phrases, correctionStrength, preLimitB
       adj[ph] = 1.0
     elseif ph.avgLevel > 0 then
       local ratio = target / ph.avgLevel
+      -- Apply phrase balancing correction strength but NOT pre-limit boost
+      -- Pre-limit boost should only apply to non-gated areas via the gate envelope
       local a = 1 + (ratio - 1) * correctionStrength
-      a = a * dBToLinear(preLimitBoost)
       adj[ph] = a
     end
   end
@@ -301,13 +398,18 @@ local function getRawWaveform(item, numSamples)
   return data, linearTodB(itemVolume)
 end
 
-local function getAdjustedWaveform(item, numSamples, phrases, adjustments, peakCeiling, trim)
+local function getAdjustedWaveform(item, numSamples, phrases, adjustments, peakCeiling, trim, gateEnabled, gateThreshold, gateHoldTime, gateReduction, gateOnsetTime)
   local take = reaper.GetActiveTake(item)
   if not take or reaper.TakeIsMIDI(take) then return nil, 0 end
   local itemVolume = reaper.GetMediaItemInfo_Value(item, "D_VOL")
 
   local aa, aaStart, aaEnd, samplerate, itemLen = get_accessor_bounds(take)
   if not aa or samplerate <= 0 or itemLen <= 0 then if take then releaseAudioAccessor(take) end; return nil, 0 end
+
+  local gatePoints = nil
+  if gateEnabled then
+    gatePoints = generateGateEnvelope(take, item, gateThreshold, gateHoldTime, gateReduction, gateOnsetTime)
+  end
 
   local data = {}
   local peakLin = peakCeiling < 0 and dBToLinear(peakCeiling) or math.huge
@@ -330,10 +432,25 @@ local function getAdjustedWaveform(item, numSamples, phrases, adjustments, peakC
         for ph, a in pairs(adjustments) do
           if itemTime >= ph.startTime and itemTime <= ph.endTime then volAdj = volAdj * a; break end
         end
+        
+        local gateAdj = 1.0
+        if gatePoints then
+          local gateIdx = math.floor(itemTime / 0.01) + 1
+          if gateIdx >= 1 and gateIdx <= #gatePoints then
+            gateAdj = gatePoints[gateIdx].reduction
+          end
+        end
+        
+        -- Only apply pre-limit boost to non-gated areas
+        local preLimitAdj = 1.0
+        if gateAdj >= 0.99 then  -- Not gated (gate adjustment is close to 1.0)
+          preLimitAdj = dBToLinear(preLimitBoost)
+        end
+        
         local pos, neg, t = 0, 0, buf.table()
         local sampleCount = math.min(read * numChannels, #t)
         for j = 1, sampleCount do
-          local s = t[j] * itemVolume * volAdj
+          local s = t[j] * itemVolume * volAdj * gateAdj * preLimitAdj
           if math.abs(s) > peakLin then s = s > 0 and peakLin or -peakLin end
           s = s * trimLin
           if s > pos then pos = s end
@@ -557,7 +674,7 @@ local function simplifyEnvelope(env)
   reaper.Envelope_SortPoints(env)
 end
 
-local function applyToItem(item, phrases, adjustments, peakCeiling, trim, preLimitBoost, resolutionMs, reducePoints)
+local function applyToItem(item, phrases, adjustments, peakCeiling, trim, preLimitBoost, resolutionMs, reducePoints, gateEnabled, gateThreshold, gateHoldTime, gateReduction, gateOnsetTime)
   local ts = reaper.time_precise()
   local take = reaper.GetActiveTake(item)
   if not take or reaper.TakeIsMIDI(take) then return false, 0 end
@@ -577,6 +694,11 @@ local function applyToItem(item, phrases, adjustments, peakCeiling, trim, preLim
   local itemVolume = reaper.GetMediaItemInfo_Value(item, "D_VOL")
   local peakLin = peakCeiling < 0 and dBToLinear(peakCeiling) or math.huge
   local trimLin = dBToLinear(trim)
+  
+  local gatePoints = nil
+  if gateEnabled then
+    gatePoints = generateGateEnvelope(take, item, gateThreshold, gateHoldTime, gateReduction, gateOnsetTime)
+  end
 
   local numPoints = math.ceil(itemLen / resolutionSec)
   local maxSamples = math.min(math.floor(samplerate * resolutionSec), 1000000)
@@ -591,13 +713,28 @@ local function applyToItem(item, phrases, adjustments, peakCeiling, trim, preLim
       for ph, a in pairs(adjustments) do
         if tRel >= ph.startTime and tRel <= ph.endTime then volAdj = volAdj * a; break end
       end
+      
+      local gateAdj = 1.0
+      if gatePoints then
+        local gateIdx = math.floor(tRel / 0.01) + 1
+        if gateIdx >= 1 and gateIdx <= #gatePoints then
+          gateAdj = gatePoints[gateIdx].reduction
+        end
+      end
+      
+      -- Only apply pre-limit boost to non-gated areas
+      local preLimitAdj = 1.0
+      if gateAdj >= 0.99 then  -- Not gated (gate adjustment is close to 1.0)
+        preLimitAdj = dBToLinear(preLimitBoost)
+      end
+      
       local peak, t = 0, buf.table()
       for j = 1, #t do 
-        local s = math.abs(t[j] * itemVolume)  -- Apply item volume to the sample
+        local s = math.abs(t[j] * itemVolume)
         if s > peak then peak = s end 
       end
-      local final = volAdj
-      if peak * volAdj > peakLin then final = peakLin / peak end
+      local final = volAdj * gateAdj * preLimitAdj
+      if peak * final > peakLin then final = peakLin / peak end
       final = final * trimLin
       local scaled = reaper.ScaleToEnvelopeMode(1, final, env)
       reaper.InsertEnvelopePoint(env, tRel, scaled, 0, 0, false, true)
@@ -616,7 +753,7 @@ local ctx = reaper.ImGui_CreateContext('Vocal Phrase Leveler')
 local sliderDoubleClickTimes = {}
 local sliderLastValue = {}
 
-local peakCeiling, correctionStrength, separationSensitivity, trim, preLimitBoost, numBars, minDB, maxDB, curvePower, resolutionMs, reducePoints, showDisplaySettings, rawWaveformOpacity, showTooltips = loadSettings()
+local peakCeiling, correctionStrength, separationSensitivity, trim, preLimitBoost, numBars, minDB, maxDB, curvePower, resolutionMs, reducePoints, showDisplaySettings, rawWaveformOpacity, showTooltips, gateEnabled, gateThreshold, gateHoldTime, gateReduction, gateOnsetTime = loadSettings()
 local statusMessage = "Ready"
 local waveformData, rawWaveformData = nil, nil
 local itemName, phrases, adjustments = "", nil, {}
@@ -648,7 +785,7 @@ local pendingSeparationSensitivity = nil
 
 -- Tab state
 local tabState = {
-  currentTab = 1  -- 1 = Controls, 2 = Display
+  currentTab = 1  -- 1 = Controls, 2 = Display, 3 = Gate
 }
 
 local isWindows = reaper.GetOS():find("Win") ~= nil
@@ -713,7 +850,7 @@ local function refreshWaveformDisplay()
   local item = reaper.GetSelectedMediaItem(0, 0)
   if not item or not phrases then return end
   adjustments = calculateVolumeAdjustments(phrases, correctionStrength / 100, preLimitBoost)
-  waveformData = getAdjustedWaveform(item, numBars, phrases, adjustments, peakCeiling, trim)
+  waveformData = getAdjustedWaveform(item, numBars, phrases, adjustments, peakCeiling, trim, gateEnabled, gateThreshold, gateHoldTime, gateReduction, gateOnsetTime)
   waveformNeedsRedraw = true
   cacheValid = false
 end
@@ -731,7 +868,7 @@ local function refreshWaveformWithDetection()
 
   if phrases then
     adjustments = calculateVolumeAdjustments(phrases, correctionStrength / 100, preLimitBoost)
-    waveformData = getAdjustedWaveform(item, numBars, phrases, adjustments, peakCeiling, trim)
+    waveformData = getAdjustedWaveform(item, numBars, phrases, adjustments, peakCeiling, trim, gateEnabled, gateThreshold, gateHoldTime, gateReduction, gateOnsetTime)
     rawWaveformData = getRawWaveform(item, numBars)
   end
 
@@ -756,7 +893,7 @@ local function refreshWaveform(forceRedetect)
 
   if phrases then
     adjustments = calculateVolumeAdjustments(phrases, correctionStrength / 100, preLimitBoost)
-    waveformData = getAdjustedWaveform(item, numBars, phrases, adjustments, peakCeiling, trim)
+    waveformData = getAdjustedWaveform(item, numBars, phrases, adjustments, peakCeiling, trim, gateEnabled, gateThreshold, gateHoldTime, gateReduction, gateOnsetTime)
     rawWaveformData = getRawWaveform(item, numBars)
     lastAudioCalcTime = reaper.time_precise() - t0
     if detectionTime > 0 then
@@ -880,6 +1017,13 @@ local function loop()
           reaper.ImGui_BulletText(ctx, "Peak Ceiling: -60 to 0 dB (hard limit on output)")
           reaper.ImGui_BulletText(ctx, "Overall Trim: -24 to +24 dB (final output level)")
           reaper.ImGui_Spacing(ctx)
+          reaper.ImGui_Text(ctx, "NOISE GATE:")
+          reaper.ImGui_BulletText(ctx, "Enable gate to reduce low-level noise")
+          reaper.ImGui_BulletText(ctx, "Threshold: signal level to trigger gate")
+          reaper.ImGui_BulletText(ctx, "Hold Time: duration to wait before reduction")
+          reaper.ImGui_BulletText(ctx, "Reduction: amount to reduce gated areas")
+          reaper.ImGui_BulletText(ctx, "Onset Time: fade-in duration for reduction")
+          reaper.ImGui_Spacing(ctx)
           reaper.ImGui_Text(ctx, "TIPS:")
           reaper.ImGui_BulletText(ctx, "Right-click sliders to reset to defaults")
           reaper.ImGui_BulletText(ctx, "Use 'Refresh' to force re-detection")
@@ -964,7 +1108,7 @@ local function loop()
               debugMsg(string.format("  Phrase %d: %.3f - %.3f\n", idx, ph.startTime, ph.endTime))
             end
           end
-          saveSettings(peakCeiling, correctionStrength, separationSensitivity, trim, preLimitBoost, resolutionMs, true, rawWaveformOpacity, showTooltips)
+          saveSettings(peakCeiling, correctionStrength, separationSensitivity, trim, preLimitBoost, resolutionMs, true, rawWaveformOpacity, showTooltips, gateEnabled, gateThreshold, gateHoldTime, gateReduction, gateOnsetTime)
           reaper.Undo_BeginBlock()
           local cnt, processed, totalApply = reaper.CountSelectedMediaItems(0), 0, 0
           local currentItem = reaper.GetSelectedMediaItem(0, 0)
@@ -983,7 +1127,7 @@ local function loop()
               end
               if itemPhrases and #itemPhrases > 0 then
                 local adj = calculateVolumeAdjustments(itemPhrases, correctionStrength / 100, preLimitBoost)
-                local ok, t = applyToItem(item, itemPhrases, adj, peakCeiling, trim, preLimitBoost, resolutionMs, true)
+                local ok, t = applyToItem(item, itemPhrases, adj, peakCeiling, trim, preLimitBoost, resolutionMs, true, gateEnabled, gateThreshold, gateHoldTime, gateReduction, gateOnsetTime)
                 if ok then processed = processed + 1; totalApply = totalApply + t end
               end
             end
@@ -998,14 +1142,14 @@ local function loop()
       reaper.ImGui_Spacing(ctx)
       
       -- Check if we have enough width for tabs
-      local minTabWidth = 250  -- Minimum width needed for tab system
+      local minTabWidth = 350  -- Minimum width needed for tab system with 3 tabs
       if contentWidth < minTabWidth then
         reaper.ImGui_Text(ctx, "Window too narrow for tab controls")
         reaper.ImGui_Spacing(ctx)
       else
         local tabButtonWidth = 100
         local tabButtonGap = 0
-        local totalTabWidth = (tabButtonWidth * 2) + tabButtonGap
+        local totalTabWidth = (tabButtonWidth * 3) + (tabButtonGap * 2)
         local tabLeftPad = math.max(0, (contentWidth - totalTabWidth) / 2)
         
         reaper.ImGui_Dummy(ctx, tabLeftPad, 0)
@@ -1013,8 +1157,10 @@ local function loop()
         
         local tabBg1 = tabState.currentTab == 1 and 0x4080FFFF or 0x404040FF
         local tabBg2 = tabState.currentTab == 2 and 0x4080FFFF or 0x404040FF
+        local tabBg3 = tabState.currentTab == 3 and 0x4080FFFF or 0x404040FF
         local tabText1 = tabState.currentTab == 1 and 0xFFFFFFFF or 0xAAAAAAAA
         local tabText2 = tabState.currentTab == 2 and 0xFFFFFFFF or 0xAAAAAAAA
+        local tabText3 = tabState.currentTab == 3 and 0xFFFFFFFF or 0xAAAAAAAA
         
         local fg = reaper.ImGui_GetForegroundDrawList(ctx)
         local tabX, tabY = reaper.ImGui_GetCursorScreenPos(ctx)
@@ -1025,6 +1171,9 @@ local function loop()
         reaper.ImGui_DrawList_AddRectFilled(fg, tabX + tabButtonWidth, tabY, tabX + tabButtonWidth * 2, tabY + 32, tabBg2, 4)
         reaper.ImGui_DrawList_AddText(fg, tabX + tabButtonWidth + (tabButtonWidth - 45) / 2, tabY + 8, tabText2, "Display")
         
+        reaper.ImGui_DrawList_AddRectFilled(fg, tabX + tabButtonWidth * 2, tabY, tabX + tabButtonWidth * 3, tabY + 32, tabBg3, 4)
+        reaper.ImGui_DrawList_AddText(fg, tabX + tabButtonWidth * 2 + (tabButtonWidth - 30) / 2, tabY + 8, tabText3, "Gate")
+        
         reaper.ImGui_SetCursorScreenPos(ctx, tabX, tabY)
         if reaper.ImGui_InvisibleButton(ctx, "tab1", tabButtonWidth, 32) then
           tabState.currentTab = 1
@@ -1032,6 +1181,10 @@ local function loop()
         reaper.ImGui_SameLine(ctx, 0, 0)
         if reaper.ImGui_InvisibleButton(ctx, "tab2", tabButtonWidth, 32) then
           tabState.currentTab = 2
+        end
+        reaper.ImGui_SameLine(ctx, 0, 0)
+        if reaper.ImGui_InvisibleButton(ctx, "tab3", tabButtonWidth, 32) then
+          tabState.currentTab = 3
         end
         
         reaper.ImGui_Spacing(ctx)
@@ -1280,12 +1433,120 @@ local function loop()
               reaper.ImGui_PopItemWidth(ctx)
             reaper.ImGui_EndChild(ctx)
           end
+
+        -- GATE TAB (NEW)
+        elseif tabState.currentTab == 3 then
+          
+          local gap = 28
+          local colWidth = math.max(220, math.min(360, (contentWidth - gap) / 2))
+          local totalControlsW = (colWidth * 2) + gap
+          local leftPad = math.max(0, (contentWidth - totalControlsW) / 2)
+
+          -- Check if we have enough width for two columns
+          if contentWidth < 500 then  -- Minimum width for two columns
+            reaper.ImGui_Text(ctx, "Window too narrow for gate controls")
+            reaper.ImGui_Spacing(ctx)
+          else
+            reaper.ImGui_Dummy(ctx, leftPad, 0)
+            reaper.ImGui_SameLine(ctx)
+
+            reaper.ImGui_BeginChild(ctx, "gate_left_col", colWidth, 0, reaper.ImGui_WindowFlags_NoScrollbar())
+              reaper.ImGui_PushItemWidth(ctx, colWidth * 0.60)
+
+              -- Gate Enable toggle
+              local changed, newVal = reaper.ImGui_Checkbox(ctx, "##gateEnabled", gateEnabled)
+              if changed then
+                gateEnabled = newVal
+                refreshWaveformDisplay()
+              end
+              reaper.ImGui_SameLine(ctx)
+              reaper.ImGui_Text(ctx, "Gate Enabled")
+              reaper.ImGui_Spacing(ctx)
+
+              -- Gate Threshold
+              changed, newVal = reaper.ImGui_SliderDouble(ctx, "##gateThreshold", gateThreshold, -80, -6, "%.1f")
+              if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_IsMouseClicked(ctx, 1) then
+                gateThreshold = DEFAULT_GATE_THRESHOLD
+                statusMessage = "Gate Threshold reset"
+                refreshWaveformDisplay()
+              elseif changed then
+                gateThreshold = newVal
+              end
+              local isActive = reaper.ImGui_IsItemActive(ctx)
+              if sliderWasActive["gateThreshold"] and not isActive then
+                refreshWaveformDisplay()
+              end
+              sliderWasActive["gateThreshold"] = isActive
+              reaper.ImGui_SameLine(ctx)
+              reaper.ImGui_Text(ctx, "Threshold (dB)")
+              reaper.ImGui_Spacing(ctx)
+
+              -- Gate Hold Time
+              changed, newVal = reaper.ImGui_SliderDouble(ctx, "##gateHoldTime", gateHoldTime, 0.05, 2.0, "%.2f")
+              if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_IsMouseClicked(ctx, 1) then
+                gateHoldTime = DEFAULT_GATE_HOLD_TIME
+                statusMessage = "Gate Hold Time reset"
+                refreshWaveformDisplay()
+              elseif changed then
+                gateHoldTime = newVal
+              end
+              isActive = reaper.ImGui_IsItemActive(ctx)
+              if sliderWasActive["gateHoldTime"] and not isActive then
+                refreshWaveformDisplay()
+              end
+              sliderWasActive["gateHoldTime"] = isActive
+              reaper.ImGui_SameLine(ctx)
+              reaper.ImGui_Text(ctx, "Hold Time (s)")
+
+              reaper.ImGui_PopItemWidth(ctx)
+            reaper.ImGui_EndChild(ctx)
+
+            reaper.ImGui_SameLine(ctx, 0, gap)
+
+            reaper.ImGui_BeginChild(ctx, "gate_right_col", colWidth, 0, reaper.ImGui_WindowFlags_NoScrollbar())
+              reaper.ImGui_PushItemWidth(ctx, colWidth * 0.60)
+
+              -- Gate Reduction
+              local changed2, newVal2 = reaper.ImGui_SliderDouble(ctx, "##gateReduction", gateReduction, -80, 0, "%.1f")
+              if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_IsMouseClicked(ctx, 1) then
+                gateReduction = DEFAULT_GATE_REDUCTION
+                statusMessage = "Gate Reduction reset"
+                refreshWaveformDisplay()
+              elseif changed2 then
+                gateReduction = newVal2
+              end
+              local isActive2 = reaper.ImGui_IsItemActive(ctx)
+              if sliderWasActive["gateReduction"] and not isActive2 then
+                refreshWaveformDisplay()
+              end
+              sliderWasActive["gateReduction"] = isActive2
+              reaper.ImGui_SameLine(ctx)
+              reaper.ImGui_Text(ctx, "Reduction (dB)")
+              reaper.ImGui_Spacing(ctx)
+
+              -- Gate Onset Time
+              changed2, newVal2 = reaper.ImGui_SliderDouble(ctx, "##gateOnsetTime", gateOnsetTime, 0.01, 0.5, "%.3f")
+              if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_IsMouseClicked(ctx, 1) then
+                gateOnsetTime = DEFAULT_GATE_ONSET_TIME
+                statusMessage = "Gate Onset Time reset"
+                refreshWaveformDisplay()
+              elseif changed2 then
+                gateOnsetTime = newVal2
+              end
+              isActive2 = reaper.ImGui_IsItemActive(ctx)
+              if sliderWasActive["gateOnsetTime"] and not isActive2 then
+                refreshWaveformDisplay()
+              end
+              sliderWasActive["gateOnsetTime"] = isActive2
+              reaper.ImGui_SameLine(ctx)
+              reaper.ImGui_Text(ctx, "Onset Time (s)")
+              reaper.ImGui_Spacing(ctx)
+
+              reaper.ImGui_PopItemWidth(ctx)
+            reaper.ImGui_EndChild(ctx)
+          end
         end
       end
-
-     --reaper.ImGui_Spacing(ctx)
-     --reaper.ImGui_Separator(ctx)
-     --reaper.ImGui_Spacing(ctx)
 
       -- ===== Waveform draw & interactions =====
       if waveformData and #waveformData > 0 then
