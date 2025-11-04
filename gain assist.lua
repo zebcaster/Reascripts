@@ -563,6 +563,54 @@ local function drawWaveform(drawList, rawData, adjustedData, x, y, width, height
   end
 end
 
+-- ===== Gate visualization overlay =====
+local function drawGateOverlay(drawList, gatePoints, adjustedData, x, y, width, height, zoomLevel, zoomCenter)
+  if not gatePoints or #gatePoints == 0 or not adjustedData or #adjustedData == 0 then return end
+  
+  local totalSamples = #adjustedData
+  local visibleSamples = math.max(50, math.floor(totalSamples / zoomLevel))
+  local startSample = math.max(1, math.min(totalSamples - visibleSamples, math.floor(zoomCenter * totalSamples - visibleSamples / 2)))
+  local endSample = math.min(totalSamples, startSample + visibleSamples)
+  local barWidth = width / visibleSamples
+  
+  -- Gate color: semi-transparent red
+  local gateColor = 0xFF000040  -- Red with low opacity
+  local thresholdAlpha = 0.5  -- Threshold for considering it "gated" (50% reduction or more)
+  
+  local reductionLin = dBToLinear(-60)  -- Default gate reduction, adjust if needed
+  
+  -- Draw gate regions
+  local inGatedRegion = false
+  local regionStartX = x
+  
+  for i = startSample, endSample do
+    if i <= #gatePoints then
+      local gatePoint = gatePoints[i]
+      local reduction = gatePoint.reduction
+      
+      -- Determine if this sample is significantly gated (reduction below threshold)
+      local isGated = reduction < (1.0 + (reductionLin - 1.0) * thresholdAlpha)
+      
+      local barX = x + (i - startSample) * barWidth
+      
+      if isGated and not inGatedRegion then
+        -- Start of a gated region
+        inGatedRegion = true
+        regionStartX = barX
+      elseif not isGated and inGatedRegion then
+        -- End of a gated region
+        inGatedRegion = false
+        reaper.ImGui_DrawList_AddRectFilled(drawList, regionStartX, y, barX, y + height, gateColor)
+      end
+    end
+  end
+  
+  -- Handle case where gated region extends to the end
+  if inGatedRegion then
+    reaper.ImGui_DrawList_AddRectFilled(drawList, regionStartX, y, x + width, y + height, gateColor)
+  end
+end
+
 -- Phrase breakpoints visualization
 local phraseMarkerPositions = {}
 local function drawPhraseMarkers(drawList, phrases, adjustedData, x, y, width, height, zoomLevel, zoomCenter, startSample, isDraggingMarker, draggedMarkerIdx, draggedMarkerX, hoverMarkerIdx, markersToDelete)
@@ -787,6 +835,7 @@ local sliderLastValue = {}
 local peakCeiling, correctionStrength, separationSensitivity, trim, preLimitBoost, numBars, minDB, maxDB, curvePower, resolutionMs, reducePoints, showDisplaySettings, rawWaveformOpacity, showTooltips, gateEnabled, gateThreshold, gateHoldTime, gateReduction, gateOnsetTime = loadSettings()
 local statusMessage = "Ready"
 local waveformData, rawWaveformData = nil, nil
+local gatePoints = nil
 local itemName, phrases, adjustments = "", nil, {}
 local lastAudioCalcTime = 0
 local phraseDetectionTime = 0
@@ -880,6 +929,12 @@ local function refreshWaveformDisplay()
   if not item or not phrases then return end
   adjustments = calculateVolumeAdjustments(phrases, correctionStrength / 100, preLimitBoost)
   waveformData = getAdjustedWaveform(item, numBars, phrases, adjustments, peakCeiling, trim, preLimitBoost, gateEnabled, gateThreshold, gateHoldTime, gateReduction, gateOnsetTime)
+  if gateEnabled then
+    local take = reaper.GetActiveTake(item)
+    if take then
+      gatePoints = generateGateEnvelope(take, item, gateThreshold, gateHoldTime, gateReduction, gateOnsetTime)
+    end
+  end
   waveformNeedsRedraw = true
   cacheValid = false
 end
@@ -899,6 +954,9 @@ local function refreshWaveformWithDetection()
     adjustments = calculateVolumeAdjustments(phrases, correctionStrength / 100, preLimitBoost)
     waveformData = getAdjustedWaveform(item, numBars, phrases, adjustments, peakCeiling, trim, preLimitBoost, gateEnabled, gateThreshold, gateHoldTime, gateReduction, gateOnsetTime)
     rawWaveformData = getRawWaveform(item, numBars)
+    if gateEnabled then
+      gatePoints = generateGateEnvelope(take, item, gateThreshold, gateHoldTime, gateReduction, gateOnsetTime)
+    end
   end
 
   waveformNeedsRedraw = true
@@ -908,7 +966,7 @@ end
 local function refreshWaveform(forceRedetect)
   local t0 = reaper.time_precise()
   local item = reaper.GetSelectedMediaItem(0, 0)
-  if not item then statusMessage = "No item selected"; waveformData, rawWaveformData = nil, nil; return end
+  if not item then statusMessage = "No item selected"; waveformData, rawWaveformData, gatePoints = nil, nil, nil; return end
   local take = reaper.GetActiveTake(item)
   if take then itemName = reaper.GetTakeName(take) end
 
@@ -924,6 +982,11 @@ local function refreshWaveform(forceRedetect)
     adjustments = calculateVolumeAdjustments(phrases, correctionStrength / 100, preLimitBoost)
     waveformData = getAdjustedWaveform(item, numBars, phrases, adjustments, peakCeiling, trim, preLimitBoost, gateEnabled, gateThreshold, gateHoldTime, gateReduction, gateOnsetTime)
     rawWaveformData = getRawWaveform(item, numBars)
+    if gateEnabled then
+      gatePoints = generateGateEnvelope(take, item, gateThreshold, gateHoldTime, gateReduction, gateOnsetTime)
+    else
+      gatePoints = nil
+    end
     lastAudioCalcTime = reaper.time_precise() - t0
     if detectionTime > 0 then
       statusMessage = string.format("Audio: %.3fs | Detect: %.3fs | Total: %.3fs", lastAudioCalcTime - detectionTime, detectionTime, lastAudioCalcTime)
@@ -931,7 +994,7 @@ local function refreshWaveform(forceRedetect)
       statusMessage = string.format("Audio: %.3fs", lastAudioCalcTime)
     end
   else
-    waveformData, rawWaveformData = nil, nil
+    waveformData, rawWaveformData, gatePoints = nil, nil, nil
     lastAudioCalcTime = reaper.time_precise() - t0
     statusMessage = "No audio detected - " .. string.format("%.3fs", lastAudioCalcTime)
   end
@@ -1040,7 +1103,8 @@ local function loop()
           reaper.ImGui_BulletText(ctx, "Threshold: signal level to trigger gate")
           reaper.ImGui_BulletText(ctx, "Hold Time: duration to wait before reduction")
           reaper.ImGui_BulletText(ctx, "Reduction: amount to reduce gated areas")
-          reaper.ImGui_BulletText(ctx, "Onset Time: fade-in duration for reduction")
+          reaper.ImGui_BulletText(ctx, "Onset Time: fade-in/out duration for smooth transitions")
+          reaper.ImGui_BulletText(ctx, "Red overlay shows where gate is actively reducing")
           reaper.ImGui_Spacing(ctx)
           reaper.ImGui_Text(ctx, "TIPS:")
           reaper.ImGui_BulletText(ctx, "Right-click sliders to reset to defaults")
