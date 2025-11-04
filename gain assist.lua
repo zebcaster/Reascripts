@@ -238,7 +238,7 @@ local function detectPhrases(take, item, separationSensitivity)
   return phrases, dt
 end
 
--- ===== Gate envelope generation (MONO ONLY) =====
+-- ===== Gate envelope generation (MONO ONLY) - WITH ANTICIPATORY PRE-FADE =====
 local function generateGateEnvelope(take, item, gateThreshold, gateHoldTime, gateReduction, gateOnsetTime)
   local aa, aaStart, aaEnd, samplerate, itemLen = get_accessor_bounds(take)
   if not aa or samplerate <= 0 or itemLen <= 0 then return nil end
@@ -249,7 +249,48 @@ local function generateGateEnvelope(take, item, gateThreshold, gateHoldTime, gat
   local thresholdLin = dBToLinear(gateThreshold)
   local reductionLin = dBToLinear(gateReduction)
   
+  -- First pass: identify all threshold crossing points
+  local crossings = {}  -- {windowIndex, isRising}
+  local belowThreshold = true
+  
+  for i = 1, numWindows do
+    local readTime = aaStart + (i - 1) * windowSize
+    local numSamples = math.min(math.floor(samplerate * windowSize), 100000)
+    
+    if numSamples > 0 then
+      local buf = getAudioBuffer(take, numSamples * 2)
+      buf.clear()
+      local read = reaper.GetAudioAccessorSamples(aa, samplerate, 1, readTime, numSamples, buf)
+      
+      local maxLevel = 0
+      if read > 0 then
+        local t = buf.table()
+        for j = 1, #t do
+          local s = math.abs(t[j])
+          if s > maxLevel then maxLevel = s end
+        end
+      end
+      
+      local isAboveThreshold = (maxLevel > thresholdLin)
+      
+      -- Detect rising edge (below to above threshold)
+      if isAboveThreshold and belowThreshold then
+        crossings[#crossings + 1] = {windowIndex = i, isRising = true}
+      end
+      -- Detect falling edge (above to below threshold)
+      if not isAboveThreshold and not belowThreshold then
+        crossings[#crossings + 1] = {windowIndex = i, isRising = false}
+      end
+      
+      belowThreshold = not isAboveThreshold
+    end
+  end
+  
+  -- Second pass: generate envelope with anticipatory fade-in
+  belowThreshold = true
   local belowThresholdTime = 0
+  local nextRisingCrossing = crossings[1]  -- Look ahead to next rising edge
+  local crossingIdx = 1
   
   for i = 1, numWindows do
     local readTime = aaStart + (i - 1) * windowSize
@@ -270,26 +311,54 @@ local function generateGateEnvelope(take, item, gateThreshold, gateHoldTime, gat
       end
       
       local itemTime = (readTime - aaStart)
+      local reduction = 1.0
       
-      if maxLevel > thresholdLin then
-        -- Signal is above threshold, reset counter
-        belowThresholdTime = 0
-      else
-        -- Signal is below threshold, accumulate time
-        belowThresholdTime = belowThresholdTime + windowSize
+      local isAboveThreshold = (maxLevel > thresholdLin)
+      
+      -- Update lookahead pointer
+      while nextRisingCrossing and i >= nextRisingCrossing.windowIndex do
+        crossingIdx = crossingIdx + 1
+        nextRisingCrossing = crossings[crossingIdx]
       end
       
-      local reduction = 1.0
-      if belowThresholdTime > gateHoldTime then
-        -- We've been below threshold long enough, start reducing
-        local timeSinceReductionStart = belowThresholdTime - gateHoldTime
-        if timeSinceReductionStart < gateOnsetTime then
-          -- Fade in the reduction
-          local fadeProgress = timeSinceReductionStart / gateOnsetTime
-          reduction = 1.0 + (reductionLin - 1.0) * fadeProgress
+      if isAboveThreshold then
+        -- Signal above threshold: gate is open
+        belowThresholdTime = 0
+        reduction = 1.0
+      else
+        -- Signal below threshold
+        belowThresholdTime = belowThresholdTime + windowSize
+        
+        if belowThresholdTime <= gateHoldTime then
+          -- Still within hold time: gate remains open
+          reduction = 1.0
         else
-          -- Full reduction applied
-          reduction = reductionLin
+          -- Past hold time: apply onset time fade-out to reduction
+          local timePastHold = belowThresholdTime - gateHoldTime
+          
+          if timePastHold < gateOnsetTime then
+            -- Fading to reduction
+            local fadeProgress = timePastHold / gateOnsetTime
+            reduction = 1.0 + (reductionLin - 1.0) * fadeProgress
+          else
+            -- Fully reduced, now check if we should start pre-fade for next signal
+            if nextRisingCrossing then
+              local windowsUntilCrossing = nextRisingCrossing.windowIndex - i
+              local timeUntilCrossing = windowsUntilCrossing * windowSize
+              
+              if timeUntilCrossing >= 0 and timeUntilCrossing <= gateOnsetTime then
+                -- We're in the pre-fade window: ramp up from reduction to 1.0
+                local fadeProgress = (gateOnsetTime - timeUntilCrossing) / gateOnsetTime
+                reduction = reductionLin + (1.0 - reductionLin) * fadeProgress
+              else
+                -- Not yet in pre-fade window: stay at full reduction
+                reduction = reductionLin
+              end
+            else
+              -- No more crossings: stay at reduction
+              reduction = reductionLin
+            end
+          end
         end
       end
       
