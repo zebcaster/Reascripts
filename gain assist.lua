@@ -443,7 +443,7 @@ local function getRawWaveform(item, numSamples)
   return data, linearTodB(itemVolume)
 end
 
-local function getAdjustedWaveform(item, numSamples, phrases, adjustments, peakCeiling, trim, preLimitBoost, gateEnabled, gateThreshold, gateHoldTime, gateReduction, gateOnsetTime)
+local function getAdjustedWaveform(item, numSamples, phrases, adjustments, peakCeiling, trim, preLimitBoost)
   local take = reaper.GetActiveTake(item)
   if not take or reaper.TakeIsMIDI(take) then return nil, 0 end
   local itemVolume = reaper.GetMediaItemInfo_Value(item, "D_VOL")
@@ -451,10 +451,10 @@ local function getAdjustedWaveform(item, numSamples, phrases, adjustments, peakC
   local aa, aaStart, aaEnd, samplerate, itemLen = get_accessor_bounds(take)
   if not aa or samplerate <= 0 or itemLen <= 0 then if take then releaseAudioAccessor(take) end; return nil, 0 end
 
-  local gatePoints = nil
-  if gateEnabled then
-    gatePoints = generateGateEnvelope(take, item, gateThreshold, gateHoldTime, gateReduction, gateOnsetTime)
-  end
+  --local gatePoints = nil
+  --if gateEnabled then
+    --gatePoints = generateGateEnvelope(take, item, gateThreshold, gateHoldTime, gateReduction, gateOnsetTime)
+  --end
 
   local data = {}
   local peakLin = peakCeiling < 0 and dBToLinear(peakCeiling) or math.huge
@@ -560,54 +560,6 @@ local function drawWaveform(drawList, rawData, adjustedData, x, y, width, height
 
   if zoomLevel > 1.01 then
     reaper.ImGui_DrawList_AddText(drawList, x + 5, y + 5, 0xFFFFFFFF, string.format("Zoom: %.1fx", zoomLevel))
-  end
-end
-
--- ===== Gate visualization overlay =====
-local function drawGateOverlay(drawList, gatePoints, adjustedData, x, y, width, height, zoomLevel, zoomCenter)
-  if not gatePoints or #gatePoints == 0 or not adjustedData or #adjustedData == 0 then return end
-  
-  local totalSamples = #adjustedData
-  local visibleSamples = math.max(50, math.floor(totalSamples / zoomLevel))
-  local startSample = math.max(1, math.min(totalSamples - visibleSamples, math.floor(zoomCenter * totalSamples - visibleSamples / 2)))
-  local endSample = math.min(totalSamples, startSample + visibleSamples)
-  local barWidth = width / visibleSamples
-  
-  -- Gate color: semi-transparent red
-  local gateColor = 0xFF000040  -- Red with low opacity
-  local thresholdAlpha = 0.5  -- Threshold for considering it "gated" (50% reduction or more)
-  
-  local reductionLin = dBToLinear(-60)  -- Default gate reduction, adjust if needed
-  
-  -- Draw gate regions
-  local inGatedRegion = false
-  local regionStartX = x
-  
-  for i = startSample, endSample do
-    if i <= #gatePoints then
-      local gatePoint = gatePoints[i]
-      local reduction = gatePoint.reduction
-      
-      -- Determine if this sample is significantly gated (reduction below threshold)
-      local isGated = reduction < (1.0 + (reductionLin - 1.0) * thresholdAlpha)
-      
-      local barX = x + (i - startSample) * barWidth
-      
-      if isGated and not inGatedRegion then
-        -- Start of a gated region
-        inGatedRegion = true
-        regionStartX = barX
-      elseif not isGated and inGatedRegion then
-        -- End of a gated region
-        inGatedRegion = false
-        reaper.ImGui_DrawList_AddRectFilled(drawList, regionStartX, y, barX, y + height, gateColor)
-      end
-    end
-  end
-  
-  -- Handle case where gated region extends to the end
-  if inGatedRegion then
-    reaper.ImGui_DrawList_AddRectFilled(drawList, regionStartX, y, x + width, y + height, gateColor)
   end
 end
 
@@ -754,6 +706,31 @@ local function simplifyEnvelope(env)
   reaper.Envelope_SortPoints(env)
 end
 
+
+local gateEnvelopeCache = {}
+
+local function getCachedGateEnvelope(take, gateThreshold, gateHoldTime, gateReduction, gateOnsetTime)
+  -- Create a cache key from the parameters
+  local cacheKey = string.format("gate_%.1f_%.2f_%.1f_%.3f_%s", 
+    gateThreshold, gateHoldTime, gateReduction, gateOnsetTime, tostring(take))
+  
+  -- Return cached version if it exists
+  if gateEnvelopeCache[cacheKey] then
+    return gateEnvelopeCache[cacheKey]
+  end
+  
+  -- Generate new envelope and cache it
+  local newEnvelope = generateGateEnvelope(take, take, gateThreshold, gateHoldTime, gateReduction, gateOnsetTime)
+  gateEnvelopeCache[cacheKey] = newEnvelope
+  
+  return newEnvelope
+end
+
+-- Function to clear cache when needed
+local function clearGateEnvelopeCache()
+  gateEnvelopeCache = {}
+end
+
 local function applyToItem(item, phrases, adjustments, peakCeiling, trim, preLimitBoost, resolutionMs, reducePoints, gateEnabled, gateThreshold, gateHoldTime, gateReduction, gateOnsetTime)
   local ts = reaper.time_precise()
   local take = reaper.GetActiveTake(item)
@@ -777,7 +754,7 @@ local function applyToItem(item, phrases, adjustments, peakCeiling, trim, preLim
   
   local gatePoints = nil
   if gateEnabled then
-    gatePoints = generateGateEnvelope(take, item, gateThreshold, gateHoldTime, gateReduction, gateOnsetTime)
+    gatePoints = getCachedGateEnvelope(take, gateThreshold, gateHoldTime, gateReduction, gateOnsetTime)
   end
 
   local numPoints = math.ceil(itemLen / resolutionSec)
@@ -1524,6 +1501,7 @@ local function loop()
                 refreshWaveformDisplay()
               elseif changed then
                 gateThreshold = newVal
+                clearGateEnvelopeCache()
               end
               local isActive = reaper.ImGui_IsItemActive(ctx)
               if sliderWasActive["gateThreshold"] and not isActive then
@@ -1541,6 +1519,7 @@ local function loop()
                 refreshWaveformDisplay()
               elseif changed then
                 gateHoldTime = newVal
+                clearGateEnvelopeCache()
               end
               isActive = reaper.ImGui_IsItemActive(ctx)
               if sliderWasActive["gateHoldTime"] and not isActive then
@@ -1565,6 +1544,7 @@ local function loop()
                 refreshWaveformDisplay()
               elseif changed2 then
                 gateReduction = newVal2
+                clearGateEnvelopeCache()
               end
               local isActive2 = reaper.ImGui_IsItemActive(ctx)
               if sliderWasActive["gateReduction"] and not isActive2 then
@@ -1582,6 +1562,7 @@ local function loop()
                 refreshWaveformDisplay()
               elseif changed2 then
                 gateOnsetTime = newVal2
+                clearGateEnvelopeCache()
               end
               isActive2 = reaper.ImGui_IsItemActive(ctx)
               if sliderWasActive["gateOnsetTime"] and not isActive2 then
