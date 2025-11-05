@@ -1169,7 +1169,9 @@ local function loop()
         reaper.ImGui_Text(ctx, "Window too narrow for controls")
         reaper.ImGui_Spacing(ctx)
       else
-        reaper.ImGui_SameLine(ctx, contentWidth - totalButtonWidth)
+        --reaper.ImGui_SameLine(ctx, contentWidth - totalButtonWidth)
+        local leftPad = math.max(0, (contentWidth - totalButtonWidth) / 2)
+        reaper.ImGui_SameLine(ctx, leftPad)
         
         if reaper.ImGui_Button(ctx, "Reset Volume", 90, 25) then
           peakCeiling, correctionStrength, preLimitBoost, trim = 0, 0, 0, 0
