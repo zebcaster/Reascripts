@@ -68,7 +68,7 @@ local function loadSettings()
   local gateHoldTime = getExtState("gateHoldTime", DEFAULT_GATE_HOLD_TIME)
   local gateReduction = getExtState("gateReduction", DEFAULT_GATE_REDUCTION)
   local gateOnsetTime = getExtState("gateOnsetTime", DEFAULT_GATE_ONSET_TIME)
-  local gateOverlayOpacity = getExtState("gateOverlayOpacity", DEFAULT_GATE_OVERLAY_OPACITY)
+  local gateOverlayOpacity = tonumber(getExtState("gateOverlayOpacity", DEFAULT_GATE_OVERLAY_OPACITY)) or DEFAULT_GATE_OVERLAY_OPACITY
   return peakCeiling, correctionStrength, separationSensitivity, trim, preLimitBoost, numBars, minDB, maxDB, curvePower, resolutionMs, reducePoints, showDisplaySettings, rawWaveformOpacity, showTooltips, gateEnabled, gateThreshold, gateHoldTime, gateReduction, gateOnsetTime, gateOverlayOpacity
 end
 
