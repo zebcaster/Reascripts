@@ -451,11 +451,6 @@ local function getAdjustedWaveform(item, numSamples, phrases, adjustments, peakC
   local aa, aaStart, aaEnd, samplerate, itemLen = get_accessor_bounds(take)
   if not aa or samplerate <= 0 or itemLen <= 0 then if take then releaseAudioAccessor(take) end; return nil, 0 end
 
-  --local gatePoints = nil
-  --if gateEnabled then
-    --gatePoints = generateGateEnvelope(take, item, gateThreshold, gateHoldTime, gateReduction, gateOnsetTime)
-  --end
-
   local data = {}
   local peakLin = peakCeiling < 0 and dBToLinear(peakCeiling) or math.huge
   local trimLin = dBToLinear(trim)
@@ -905,13 +900,7 @@ local function refreshWaveformDisplay()
   local item = reaper.GetSelectedMediaItem(0, 0)
   if not item or not phrases then return end
   adjustments = calculateVolumeAdjustments(phrases, correctionStrength / 100, preLimitBoost)
-  waveformData = getAdjustedWaveform(item, numBars, phrases, adjustments, peakCeiling, trim, preLimitBoost, gateEnabled, gateThreshold, gateHoldTime, gateReduction, gateOnsetTime)
-  if gateEnabled then
-    local take = reaper.GetActiveTake(item)
-    if take then
-      gatePoints = generateGateEnvelope(take, item, gateThreshold, gateHoldTime, gateReduction, gateOnsetTime)
-    end
-  end
+  waveformData = getAdjustedWaveform(item, numBars, phrases, adjustments, peakCeiling, trim, preLimitBoost)
   waveformNeedsRedraw = true
   cacheValid = false
 end
@@ -929,11 +918,7 @@ local function refreshWaveformWithDetection()
 
   if phrases then
     adjustments = calculateVolumeAdjustments(phrases, correctionStrength / 100, preLimitBoost)
-    waveformData = getAdjustedWaveform(item, numBars, phrases, adjustments, peakCeiling, trim, preLimitBoost, gateEnabled, gateThreshold, gateHoldTime, gateReduction, gateOnsetTime)
-    rawWaveformData = getRawWaveform(item, numBars)
-    if gateEnabled then
-      gatePoints = generateGateEnvelope(take, item, gateThreshold, gateHoldTime, gateReduction, gateOnsetTime)
-    end
+    waveformData = getAdjustedWaveform(item, numBars, phrases, adjustments, peakCeiling, trim, preLimitBoost)
   end
 
   waveformNeedsRedraw = true
@@ -943,7 +928,7 @@ end
 local function refreshWaveform(forceRedetect)
   local t0 = reaper.time_precise()
   local item = reaper.GetSelectedMediaItem(0, 0)
-  if not item then statusMessage = "No item selected"; waveformData, rawWaveformData, gatePoints = nil, nil, nil; return end
+  if not item then statusMessage = "No item selected"; waveformData, rawWaveformData = nil, nil; return end
   local take = reaper.GetActiveTake(item)
   if take then itemName = reaper.GetTakeName(take) end
 
@@ -957,13 +942,7 @@ local function refreshWaveform(forceRedetect)
 
   if phrases then
     adjustments = calculateVolumeAdjustments(phrases, correctionStrength / 100, preLimitBoost)
-    waveformData = getAdjustedWaveform(item, numBars, phrases, adjustments, peakCeiling, trim, preLimitBoost, gateEnabled, gateThreshold, gateHoldTime, gateReduction, gateOnsetTime)
-    rawWaveformData = getRawWaveform(item, numBars)
-    if gateEnabled then
-      gatePoints = generateGateEnvelope(take, item, gateThreshold, gateHoldTime, gateReduction, gateOnsetTime)
-    else
-      gatePoints = nil
-    end
+    waveformData = getAdjustedWaveform(item, numBars, phrases, adjustments, peakCeiling, trim, preLimitBoost)
     lastAudioCalcTime = reaper.time_precise() - t0
     if detectionTime > 0 then
       statusMessage = string.format("Audio: %.3fs | Detect: %.3fs | Total: %.3fs", lastAudioCalcTime - detectionTime, detectionTime, lastAudioCalcTime)
@@ -971,7 +950,7 @@ local function refreshWaveform(forceRedetect)
       statusMessage = string.format("Audio: %.3fs", lastAudioCalcTime)
     end
   else
-    waveformData, rawWaveformData, gatePoints = nil, nil, nil
+    waveformData, rawWaveformData = nil, nil
     lastAudioCalcTime = reaper.time_precise() - t0
     statusMessage = "No audio detected - " .. string.format("%.3fs", lastAudioCalcTime)
   end
@@ -1646,7 +1625,7 @@ local function loop()
                 if take then recalculatePhraseLevels(take, item, phrases) end
               end
               adjustments = calculateVolumeAdjustments(phrases, correctionStrength / 100, preLimitBoost)
-              waveformData = getAdjustedWaveform(item, numBars, phrases, adjustments, peakCeiling, trim, preLimitBoost, gateEnabled, gateThreshold, gateHoldTime, gateReduction, gateOnsetTime)
+              waveformData = getAdjustedWaveform(item, numBars, phrases, adjustments, peakCeiling, trim, preLimitBoost)
               statusMessage = string.format("Deleted %d breakpoint(s)", deletedCount)
               waveformNeedsRedraw, cacheValid = true, false
             end
@@ -1683,7 +1662,7 @@ local function loop()
               local take = reaper.GetActiveTake(item)
               if take then recalculatePhraseLevels(take, item, phrases) end
               adjustments = calculateVolumeAdjustments(phrases, correctionStrength / 100, preLimitBoost)
-              waveformData = getAdjustedWaveform(item, numBars, phrases, adjustments, peakCeiling, trim, preLimitBoost, gateEnabled, gateThreshold, gateHoldTime, gateReduction, gateOnsetTime)
+              waveformData = getAdjustedWaveform(item, numBars, phrases, adjustments, peakCeiling, trim, preLimitBoost)
             end
             waveformNeedsRedraw, cacheValid = true, false
           end
@@ -1697,7 +1676,7 @@ local function loop()
               local take = reaper.GetActiveTake(item)
               if take then recalculatePhraseLevels(take, item, phrases) end
               adjustments = calculateVolumeAdjustments(phrases, correctionStrength / 100, preLimitBoost)
-              waveformData = getAdjustedWaveform(item, numBars, phrases, adjustments, peakCeiling, trim, preLimitBoost, gateEnabled, gateThreshold, gateHoldTime, gateReduction, gateOnsetTime)
+              waveformData = getAdjustedWaveform(item, numBars, phrases, adjustments, peakCeiling, trim, preLimitBoost)
               waveformNeedsRedraw, cacheValid = true, false
               statusMessage = "Breakpoint adjusted"
               phrasesManualllyAdjusted = true
