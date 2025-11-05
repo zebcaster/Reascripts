@@ -12,14 +12,14 @@ end
 local SCRIPT_NAME = "Vocal Phrase Leveler with Preview"
 local DEFAULT_PEAK_CEILING = 0
 local DEFAULT_CORRECTION_STRENGTH = 0
-local DEFAULT_SEPARATION_SENSITIVITY = 0.3
+local DEFAULT_SEPARATION_SENSITIVITY = 0.05
 local DEFAULT_TRIM = 0
 local DEFAULT_PRE_LIMIT_BOOST = 0
 local DEFAULT_NUM_BARS = 10000
 local DEFAULT_MIN_DB = -150
 local DEFAULT_MAX_DB = -11
 local DEFAULT_CURVE_POWER = 16.0
-local DEFAULT_RESOLUTION_MS = 50
+local DEFAULT_RESOLUTION_MS = 10
 local DEFAULT_REDUCE_POINTS = true
 local DEFAULT_RAW_WAVEFORM_OPACITY = 30
 
@@ -556,6 +556,52 @@ local function drawWaveform(drawList, rawData, adjustedData, x, y, width, height
   end
 end
 
+local function drawGateOverlay(drawList, gatePoints, adjustedData, item, x, y, width, height, zoomLevel, zoomCenter)
+  if not gatePoints or #gatePoints == 0 then return end
+  if not adjustedData or #adjustedData == 0 then return end
+  
+  local take = reaper.GetActiveTake(item)
+  if not take then return end
+  
+  local aa, aaStart, aaEnd, samplerate, itemLen = get_accessor_bounds(take)
+  if not aa then return end
+  
+  local totalSamples = #adjustedData
+  local visibleSamples = math.max(50, math.floor(totalSamples / zoomLevel))
+  local startSample = math.max(1, math.min(totalSamples - visibleSamples, math.floor(zoomCenter * totalSamples - visibleSamples / 2)))
+  local endSample = math.min(totalSamples, startSample + visibleSamples)
+  local barWidth = width / visibleSamples
+  
+  local centerY = y + height / 2
+  local halfH = height / 2
+  
+  -- Gate overlay color: red with very low opacity (semi-transparent)
+  local gateOverlayColor = 0xFF000015  -- Red with ~18% opacity
+  
+  -- Draw gate reduction regions
+  for i = startSample, endSample do
+    local barX = x + (i - startSample) * barWidth
+    
+    -- Map waveform sample index to item time
+    local windowSize = itemLen / totalSamples
+    local itemTime = (i - 1) * windowSize
+    
+    -- Find corresponding gate point at 0.01 second resolution
+    local gateIdx = math.floor(itemTime / 0.01) + 1
+    
+    if gateIdx >= 1 and gateIdx <= #gatePoints then
+      local gatePoint = gatePoints[gateIdx]
+      local reduction = gatePoint.reduction
+      
+      -- Only draw overlay where gate is actively reducing (not at full 1.0)
+      if reduction < 0.99 then
+        -- Draw overlay for the full height at this position
+        reaper.ImGui_DrawList_AddRectFilled(drawList, barX, y, barX + barWidth, y + height, gateOverlayColor)
+      end
+    end
+  end
+end
+
 -- Phrase breakpoints visualization
 local phraseMarkerPositions = {}
 local function drawPhraseMarkers(drawList, phrases, adjustedData, x, y, width, height, zoomLevel, zoomCenter, startSample, isDraggingMarker, draggedMarkerIdx, draggedMarkerX, hoverMarkerIdx, markersToDelete)
@@ -899,6 +945,17 @@ local function refreshWaveformDisplay()
   if not item or not phrases then return end
   adjustments = calculateVolumeAdjustments(phrases, correctionStrength / 100, preLimitBoost)
   waveformData = getAdjustedWaveform(item, numBars, phrases, adjustments, peakCeiling, trim, preLimitBoost)
+  
+  -- Generate gate points for visualization
+  if gateEnabled then
+    local take = reaper.GetActiveTake(item)
+    if take then
+      gatePoints = getCachedGateEnvelope(take, gateThreshold, gateHoldTime, gateReduction, gateOnsetTime)
+    end
+  else
+    gatePoints = nil
+  end
+  
   waveformNeedsRedraw = true
   cacheValid = false
 end
@@ -917,6 +974,13 @@ local function refreshWaveformWithDetection()
   if phrases then
     adjustments = calculateVolumeAdjustments(phrases, correctionStrength / 100, preLimitBoost)
     waveformData = getAdjustedWaveform(item, numBars, phrases, adjustments, peakCeiling, trim, preLimitBoost)
+    
+    -- Generate gate points for visualization
+    if gateEnabled then
+      gatePoints = getCachedGateEnvelope(take, gateThreshold, gateHoldTime, gateReduction, gateOnsetTime)
+    else
+      gatePoints = nil
+    end
   end
 
   waveformNeedsRedraw = true
@@ -941,6 +1005,12 @@ local function refreshWaveform(forceRedetect)
   if phrases then
     adjustments = calculateVolumeAdjustments(phrases, correctionStrength / 100, preLimitBoost)
     waveformData = getAdjustedWaveform(item, numBars, phrases, adjustments, peakCeiling, trim, preLimitBoost)
+    -- Generate gate points for visualization
+    if gateEnabled then
+      gatePoints = getCachedGateEnvelope(take, gateThreshold, gateHoldTime, gateReduction, gateOnsetTime)
+    else
+      gatePoints = nil
+    end
     lastAudioCalcTime = reaper.time_precise() - t0
     if detectionTime > 0 then
       statusMessage = string.format("Audio: %.3fs | Detect: %.3fs | Total: %.3fs", lastAudioCalcTime - detectionTime, detectionTime, lastAudioCalcTime)
@@ -1313,7 +1383,7 @@ local function loop()
               reaper.ImGui_Text(ctx, "Peak Ceiling (dB)")
               reaper.ImGui_Spacing(ctx)
 
-              changed2, newVal2 = reaper.ImGui_SliderDouble(ctx, "##resolutionMs", resolutionMs, 1, 100, "%.0f")
+              changed2, newVal2 = reaper.ImGui_SliderDouble(ctx, "##resolutionMs", resolutionMs, 1, 50, "%.0f")
               if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_IsMouseClicked(ctx, 1) then
                 resolutionMs = DEFAULT_RESOLUTION_MS
                 statusMessage = "Peak Smoothness reset"
@@ -1757,6 +1827,14 @@ local function loop()
         local fg = reaper.ImGui_GetForegroundDrawList(ctx)
         reaper.ImGui_DrawList_AddRectFilled(fg, x, y, x + w, y + h, 0x1A1A1AFF)
         drawWaveform(fg, rawWaveformData, waveformData, x, y, w, h, minDB, maxDB, curvePower, zoomLevel, zoomCenter, rawWaveformOpacity)
+        
+        -- Draw gate overlay (red semi-transparent background where gate is reducing)
+       local item = reaper.GetSelectedMediaItem(0, 0)
+       if item and gateEnabled and gatePoints then
+         drawGateOverlay(fg, gatePoints, waveformData, item, x, y, w, h, zoomLevel, zoomCenter)
+       end
+       
+        -- Draw phrase markers on top (so they're not red-tinted)
         drawPhraseMarkers(fg, phrases, waveformData, x, y, w, h, zoomLevel, zoomCenter, startSample, isDraggingMarker, draggedMarkerIdx, draggedMarkerX, hoverMarkerIdx, markersToDelete)
 
         if isErasing then
