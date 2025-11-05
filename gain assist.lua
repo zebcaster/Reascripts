@@ -1073,7 +1073,7 @@ local function loop()
     if reaper.ImGui_IsKeyPressed(ctx, reaper.ImGui_Key_Escape()) then open = false end
 
     local winW, winH = reaper.ImGui_GetWindowSize(ctx)
-    if winH < 400 then
+    if winH < 500 then
       local availW, availH = reaper.ImGui_GetContentRegionAvail(ctx)
       local msg = "Window too small - please increase height"
       local textW = reaper.ImGui_CalcTextSize(ctx, msg)
