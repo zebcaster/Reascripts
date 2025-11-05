@@ -478,8 +478,6 @@ local function getAdjustedWaveform(item, numSamples, phrases, adjustments, peakC
           local s = t[j] * itemVolume * volAdj * preLimitLin
           if math.abs(s) > peakLin then s = s > 0 and peakLin or -peakLin end
           s = s * trimLin
-          if math.abs(s) > peakLin then s = s > 0 and peakLin or -peakLin end
-          s = s * trimLin
           if s > pos then pos = s end
           if s < neg then neg = s end
         end
