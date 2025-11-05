@@ -1160,6 +1160,7 @@ local function loop()
       reaper.ImGui_Text(ctx, "Status: " .. (statusMessage or ""))
       reaper.ImGui_Dummy(ctx, 0, 2)
       
+      
       local contentWidth, _ = reaper.ImGui_GetContentRegionAvail(ctx)
       local totalButtonWidth = 90 + 150 + 100 + 100 + 110
       local buttonSpacing = 8
@@ -1169,34 +1170,9 @@ local function loop()
         reaper.ImGui_Text(ctx, "Window too narrow for controls")
         reaper.ImGui_Spacing(ctx)
       else
-        --reaper.ImGui_SameLine(ctx, contentWidth - totalButtonWidth)
-        local leftPad = math.max(0, (contentWidth - totalButtonWidth) / 2)
-        reaper.ImGui_SameLine(ctx, leftPad)
-        
-        if reaper.ImGui_Button(ctx, "Reset Volume", 90, 25) then
-          peakCeiling, correctionStrength, preLimitBoost, trim = 0, 0, 0, 0
-          waveformNeedsRedraw = true
-          cacheValid = false
-          refreshWaveform()
-          statusMessage = "All volume controls reset to 0"
-        end
-        reaper.ImGui_SameLine(ctx, 0, buttonSpacing)
-        
-        if reaper.ImGui_Button(ctx, "Reset Separation", 150, 25) then
-          refreshWaveformWithDetection()
-          statusMessage = "Phrase separation reset"
-        end
-        reaper.ImGui_SameLine(ctx, 0, buttonSpacing)
-        
-        if reaper.ImGui_Button(ctx, "Refresh", 100, 25) then
-          refreshWaveform(true); zoomLevel, zoomCenter = 1.0, 0.5
-        end
-        reaper.ImGui_SameLine(ctx, 0, buttonSpacing)
-        
-        if reaper.ImGui_Button(ctx, "Help", 100, 25) then
-          showHelpMenu = not showHelpMenu
-        end
-        reaper.ImGui_SameLine(ctx, 0, buttonSpacing)
+        reaper.ImGui_SameLine(ctx, contentWidth - totalButtonWidth)
+        --local leftPad = math.max(0, (contentWidth - totalButtonWidth) / 2)
+       -- reaper.ImGui_SameLine(ctx, leftPad)
         
         if reaper.ImGui_Button(ctx, "Apply", 110, 25) then
           if phrases and #phrases > 0 then
@@ -1209,7 +1185,7 @@ local function loop()
           reaper.Undo_BeginBlock()
           local cnt, processed, totalApply = reaper.CountSelectedMediaItems(0), 0, 0
           local currentItem = reaper.GetSelectedMediaItem(0, 0)
-
+        
           for i = 0, cnt - 1 do
             local item = reaper.GetSelectedMediaItem(0, i)
             local take = reaper.GetActiveTake(item)
@@ -1232,6 +1208,31 @@ local function loop()
           reaper.Undo_EndBlock("Vocal Phrase Leveler", -1)
           reaper.UpdateArrange()
           statusMessage = string.format("Committed to %d item(s) | Apply: %.3fs", processed, totalApply)
+        end
+        reaper.ImGui_SameLine(ctx, 0, buttonSpacing)
+        
+        --if reaper.ImGui_Button(ctx, "Reset Volume", 90, 25) then
+          --peakCeiling, correctionStrength, preLimitBoost, trim = 0, 0, 0, 0
+          --waveformNeedsRedraw = true
+          --cacheValid = false
+          --refreshWaveform()
+          --statusMessage = "All volume controls reset to 0"
+        --end
+        --reaper.ImGui_SameLine(ctx, 0, buttonSpacing)
+        
+        --if reaper.ImGui_Button(ctx, "Reset Separation", 150, 25) then
+          --refreshWaveformWithDetection()
+          --statusMessage = "Phrase separation reset"
+        --end
+        --reaper.ImGui_SameLine(ctx, 0, buttonSpacing)
+        
+        if reaper.ImGui_Button(ctx, "Refresh", 100, 25) then
+          refreshWaveform(true); zoomLevel, zoomCenter = 1.0, 0.5
+        end
+        reaper.ImGui_SameLine(ctx, 0, buttonSpacing)
+        
+        if reaper.ImGui_Button(ctx, "Help", 100, 25) then
+          showHelpMenu = not showHelpMenu
         end
       end
 
