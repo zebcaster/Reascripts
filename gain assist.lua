@@ -449,7 +449,7 @@ local function getRawWaveform(item, numSamples)
   return data, linearTodB(itemVolume)
 end
 
-local function getAdjustedWaveform(item, numSamples, phrases, adjustments, peakCeiling, trim)
+local function getAdjustedWaveform(item, numSamples, phrases, adjustments, peakCeiling, trim, preLimitBoost)
   local take = reaper.GetActiveTake(item)
   if not take or reaper.TakeIsMIDI(take) then return nil, 0 end
   local itemVolume = reaper.GetMediaItemInfo_Value(item, "D_VOL")
@@ -461,6 +461,7 @@ local function getAdjustedWaveform(item, numSamples, phrases, adjustments, peakC
   local data = {}
   local peakLin = peakCeiling < 0 and dBToLinear(peakCeiling) or math.huge
   local trimLin = dBToLinear(trim)
+  local preLimitLin = dBToLinear(preLimitBoost)
   local windowSize = itemLen / numSamples
 
   for i = 0, numSamples - 1 do
@@ -482,7 +483,7 @@ local function getAdjustedWaveform(item, numSamples, phrases, adjustments, peakC
         local pos, neg, t = 0, 0, buf.table()
         -- Process stereo interleaved data: skip every other value to avoid L/R aliasing
         for j = 1, #t, numChannels * 2 do
-          local s = t[j] * itemVolume * volAdj
+          local s = t[j] * itemVolume * volAdj * preLimitLin
           if math.abs(s) > peakLin then s = s > 0 and peakLin or -peakLin end
           s = s * trimLin
           if s > pos then pos = s end
@@ -567,13 +568,14 @@ end
 local function drawPlayhead(drawList, item, x, y, w, h, zoomLevel, zoomCenter, totalSamples, startSample, visibleSamples)
   if not item then return end
   
-  local playPos = reaper.GetPlayPosition()
+  local isPlaying = reaper.GetPlayState() & 1 == 1
+  local cursorPos = isPlaying and reaper.GetPlayPosition() or reaper.GetCursorPosition()
   local itemStart = reaper.GetMediaItemInfo_Value(item, "D_POSITION")
   local itemLength = reaper.GetMediaItemInfo_Value(item, "D_LENGTH")
   local itemEnd = itemStart + itemLength
   
-  -- Check if playhead is within this item
-  if playPos >= itemStart and playPos <= itemEnd then
+  -- Check if cursor is within this item
+  if cursorPos >= itemStart and cursorPos <= itemEnd then
     -- Get the take to access audio bounds
     local take = reaper.GetActiveTake(item)
     if not take then return end
@@ -582,7 +584,7 @@ local function drawPlayhead(drawList, item, x, y, w, h, zoomLevel, zoomCenter, t
     if not aa then return end
     
     -- Calculate offset within the item (in item time, not project time)
-    local itemOffset = playPos - itemStart
+    local itemOffset = cursorPos - itemStart
     
     -- Map item time to waveform sample position
     local samplePos = math.floor((itemOffset / audioItemLen) * totalSamples) + 1
@@ -1366,13 +1368,16 @@ local function loop()
         local tabX, tabY = reaper.ImGui_GetCursorScreenPos(ctx)
         
         reaper.ImGui_DrawList_AddRectFilled(fg, tabX, tabY, tabX + tabButtonWidth, tabY + 32, tabBg1, 4)
-        reaper.ImGui_DrawList_AddText(fg, tabX + (tabButtonWidth - 55) / 2, tabY + 8, tabText1, "Level")
-        
+        local textW1, textH1 = reaper.ImGui_CalcTextSize(ctx, "Level")
+        reaper.ImGui_DrawList_AddText(fg, tabX + (tabButtonWidth - textW1) / 2, tabY + (32 - textH1) / 2, tabText1, "Level")
+       
         reaper.ImGui_DrawList_AddRectFilled(fg, tabX + tabButtonWidth, tabY, tabX + tabButtonWidth * 2, tabY + 32, tabBg2, 4)
-        reaper.ImGui_DrawList_AddText(fg, tabX + tabButtonWidth + (tabButtonWidth - 45) / 2, tabY + 8, tabText2, "Gate")
+        local textW2, textH2 = reaper.ImGui_CalcTextSize(ctx, "Gate")
+        reaper.ImGui_DrawList_AddText(fg, tabX + tabButtonWidth + (tabButtonWidth - textW2) / 2, tabY + (32 - textH2) / 2, tabText2, "Gate")
         
         reaper.ImGui_DrawList_AddRectFilled(fg, tabX + tabButtonWidth * 2, tabY, tabX + tabButtonWidth * 3, tabY + 32, tabBg3, 4)
-        reaper.ImGui_DrawList_AddText(fg, tabX + tabButtonWidth * 2 + (tabButtonWidth - 30) / 2, tabY + 8, tabText3, "Display")
+        local textW3, textH3 = reaper.ImGui_CalcTextSize(ctx, "Display")
+        reaper.ImGui_DrawList_AddText(fg, tabX + tabButtonWidth * 2 + (tabButtonWidth - textW3) / 2, tabY + (32 - textH3) / 2, tabText3, "Display")
         
         reaper.ImGui_SetCursorScreenPos(ctx, tabX, tabY)
         if reaper.ImGui_InvisibleButton(ctx, "tab1", tabButtonWidth, 32) then
