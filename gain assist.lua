@@ -252,12 +252,13 @@ local function detectPhrases(take, item, separationSensitivity)
   return phrases, dt
 end
 
--- ===== Gate Envelope Generation - SINGLE PASS WITH ITEM VOLUME CORRECTION =====
+---- ===== Gate Envelope Generation - OPTIMIZED WITH STEREO DECIMATION =====
 local function generateGateEnvelope(take, item, gateThreshold, gateHoldTime, gateReduction, gateOnsetTime)
   local aa, aaStart, aaEnd, samplerate, itemLen = get_accessor_bounds(take)
   if not aa or samplerate <= 0 or itemLen <= 0 then return nil end
 
   local itemVolume = reaper.GetMediaItemInfo_Value(item, "D_VOL")
+  local numChannels = getSourceChannelCount(take)
   local gatePoints = {}
   local windowSize = 0.01
   local numWindows = math.ceil(itemLen / windowSize)
@@ -276,14 +277,15 @@ local function generateGateEnvelope(take, item, gateThreshold, gateHoldTime, gat
     local numSamples = math.min(math.floor(samplerate * windowSize), 100000)
     
     if numSamples > 0 then
-      local buf = getAudioBuffer(take, numSamples * 2)
+      local buf = getAudioBuffer(take, numSamples * numChannels * 2)
       buf.clear()
-      local read = reaper.GetAudioAccessorSamples(aa, samplerate, 1, readTime, numSamples, buf)
+      local read = reaper.GetAudioAccessorSamples(aa, samplerate, numChannels, readTime, numSamples, buf)
       
       local maxLevel = 0
       if read > 0 then
         local t = buf.table()
-        for j = 1, #t do
+        -- Process stereo interleaved data: skip every other pair to avoid L/R aliasing
+        for j = 1, #t, numChannels * 2 do
           local s = math.abs(t[j] * itemVolume)
           if s > maxLevel then maxLevel = s end
         end
@@ -558,6 +560,44 @@ local function drawWaveform(drawList, rawData, adjustedData, x, y, width, height
 
   if zoomLevel > 1.01 then
     reaper.ImGui_DrawList_AddText(drawList, x + 5, y + 5, 0xFFFFFFFF, string.format("Zoom: %.1fx", zoomLevel))
+  end
+end
+
+-- ===== Playhead Drawing =====
+local function drawPlayhead(drawList, item, x, y, w, h, zoomLevel, zoomCenter, totalSamples, startSample, visibleSamples)
+  if not item then return end
+  
+  local playPos = reaper.GetPlayPosition()
+  local itemStart = reaper.GetMediaItemInfo_Value(item, "D_POSITION")
+  local itemLength = reaper.GetMediaItemInfo_Value(item, "D_LENGTH")
+  local itemEnd = itemStart + itemLength
+  
+  -- Check if playhead is within this item
+  if playPos >= itemStart and playPos <= itemEnd then
+    -- Get the take to access audio bounds
+    local take = reaper.GetActiveTake(item)
+    if not take then return end
+    
+    local aa, aaStart, aaEnd, _, audioItemLen = get_accessor_bounds(take)
+    if not aa then return end
+    
+    -- Calculate offset within the item (in item time, not project time)
+    local itemOffset = playPos - itemStart
+    
+    -- Map item time to waveform sample position
+    local samplePos = math.floor((itemOffset / audioItemLen) * totalSamples) + 1
+    
+    -- Check if sample position is visible in current zoom/pan
+    if samplePos >= startSample and samplePos <= startSample + visibleSamples then
+      -- Calculate pixel X position on waveform
+      local xPos = x + ((samplePos - startSample) / visibleSamples) * w
+      
+      -- Draw playhead line (bright green, semi-thick)
+      reaper.ImGui_DrawList_AddLine(drawList, xPos, y, xPos, y + h, 0x00FF00FF, 2)
+      
+      -- Optional: Add a subtle glow/highlight effect by drawing a slightly thicker semi-transparent line behind it
+      reaper.ImGui_DrawList_AddLine(drawList, xPos, y, xPos, y + h, 0x00FF0044, 4)
+    end
   end
 end
 
@@ -1053,6 +1093,57 @@ local function getPinnedWaveformRect(plotHeight)
   return x, y, width, height
 end
 
+-- ===== Hotkey Handling =====
+local function handleHotkeys()
+  -- Enter key: Apply changes
+  if reaper.ImGui_IsKeyPressed(ctx, reaper.ImGui_Key_Enter()) then
+    if phrases and #phrases > 0 then
+      debugMsg("DEBUG: Applying with " .. #phrases .. " phrases (manually adjusted: " .. tostring(phrasesManualllyAdjusted) .. ")\n")
+      for idx, ph in ipairs(phrases) do
+        debugMsg(string.format("  Phrase %d: %.3f - %.3f\n", idx, ph.startTime, ph.endTime))
+      end
+    end
+    saveSettings(peakCeiling, correctionStrength, separationSensitivity, trim, preLimitBoost, resolutionMs, true, rawWaveformOpacity, showTooltips, gateEnabled, gateThreshold, gateHoldTime, gateReduction, gateOnsetTime, gateOverlayOpacity)
+    reaper.Undo_BeginBlock()
+    local cnt, processed, totalApply = reaper.CountSelectedMediaItems(0), 0, 0
+    local currentItem = reaper.GetSelectedMediaItem(0, 0)
+  
+    for i = 0, cnt - 1 do
+      local item = reaper.GetSelectedMediaItem(0, i)
+      local take = reaper.GetActiveTake(item)
+      if take and not reaper.TakeIsMIDI(take) then
+        local itemPhrases
+        if item == currentItem and phrases and #phrases > 0 and phrasesManualllyAdjusted then
+          itemPhrases = phrases
+          debugMsg("Using manual phrases for current item\n")
+        else
+          itemPhrases = detectPhrases(take, item, separationSensitivity)
+          debugMsg("Auto-detecting phrases for other item\n")
+        end
+        if itemPhrases and #itemPhrases > 0 then
+          local adj = calculateVolumeAdjustments(itemPhrases, correctionStrength / 100, preLimitBoost)
+          local ok, t = applyToItem(item, itemPhrases, adj, peakCeiling, trim, preLimitBoost, resolutionMs, true, gateEnabled, gateThreshold, gateHoldTime, gateReduction, gateOnsetTime)
+          if ok then processed = processed + 1; totalApply = totalApply + t end
+        end
+      end
+    end
+    reaper.Undo_EndBlock("Vocal Phrase Leveler", -1)
+    reaper.UpdateArrange()
+    statusMessage = string.format("Committed to %d item(s) | Apply: %.3fs", processed, totalApply)
+  end
+ -- Spacebar: Play/Pause (check when ImGui is not consuming input)
+  if not reaper.ImGui_IsAnyItemActive(ctx) and not reaper.ImGui_IsAnyItemHovered(ctx) then
+    if reaper.ImGui_IsKeyPressed(ctx, reaper.ImGui_Key_Space()) then
+      local isPlaying = reaper.GetPlayState() & 1 == 1
+      if isPlaying then
+        reaper.Main_OnCommand(reaper.NamedCommandLookup("TRANSPORT_PAUSE"), 0)
+      else
+        reaper.Main_OnCommand(reaper.NamedCommandLookup("TRANSPORT_PLAY"), 0)
+      end
+    end
+  end
+end
+
 function PushTheme()
   reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_WindowPadding(), 20, 8)
   reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_FrameRounding(), 12)
@@ -1079,7 +1170,8 @@ local function loop()
   local visible, open = reaper.ImGui_Begin(ctx, 'Vocal Phrase Leveler', true, reaper.ImGui_WindowFlags_None())
   if visible then
     if reaper.ImGui_IsKeyPressed(ctx, reaper.ImGui_Key_Escape()) then open = false end
-
+    handleHotkeys()
+    
     local winW, winH = reaper.ImGui_GetWindowSize(ctx)
     if winH < 500 then
       local availW, availH = reaper.ImGui_GetContentRegionAvail(ctx)
@@ -1870,7 +1962,10 @@ local function loop()
        
         -- Draw phrase markers on top (so they're not red-tinted)
         drawPhraseMarkers(fg, phrases, waveformData, x, y, w, h, zoomLevel, zoomCenter, startSample, isDraggingMarker, draggedMarkerIdx, draggedMarkerX, hoverMarkerIdx, markersToDelete)
-
+        -- Draw playhead line
+        drawPlayhead(fg, item, x, y, w, h, zoomLevel, zoomCenter, totalSamples, startSample, visibleSamples)  
+          
+          
         if isErasing then
           reaper.ImGui_DrawList_AddCircle(fg, mouse_x, mouse_y, 20, 0xFF0000FF, 0, 2)
           reaper.ImGui_DrawList_AddLine(fg, mouse_x - 10, mouse_y, mouse_x + 10, mouse_y, 0xFF0000FF, 2)
