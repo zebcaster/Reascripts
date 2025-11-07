@@ -102,6 +102,14 @@ local function linearTodB(linear)
   return 20 * math.log10(linear) 
 end
 
+-- Helper function to detect channel count from source
+local function getSourceChannelCount(take)
+  local src = reaper.GetMediaItemTake_Source(take)
+  if not src then return 1 end
+  local numChannels = reaper.GetMediaSourceNumChannels(src)
+  return math.max(1, numChannels)
+end
+
 -- ===== Audio accessor mgmt =====
 local audioAccessors, audioBuffers = {}, {}
 
@@ -142,6 +150,7 @@ local function getRMSLevels(take, item)
   if not aa or samplerate <= 0 or itemLen <= 0 then if take then releaseAudioAccessor(take) end; return nil end
 
   local itemVolume = reaper.GetMediaItemInfo_Value(item, "D_VOL")
+  local numChannels = getSourceChannelCount(take)
   local windowSize = 0.1
   local numWindows = math.max(0, math.floor(itemLen / windowSize))
   local levels = {}
@@ -150,16 +159,17 @@ local function getRMSLevels(take, item)
     local readTime = aaStart + (i * windowSize)
     local numSamples = math.floor(samplerate * windowSize)
     if numSamples > 0 and numSamples <= 1000000 then
-      local buf = getAudioBuffer(take, numSamples * 2)
+      local buf = getAudioBuffer(take, numSamples * numChannels * 2)
       buf.clear()
-      local read = reaper.GetAudioAccessorSamples(aa, samplerate, 1, readTime, numSamples, buf)
+      local read = reaper.GetAudioAccessorSamples(aa, samplerate, numChannels, readTime, numSamples, buf)
       if read > 0 then
         local sum, t = 0, buf.table()
-        for j = 1, #t do 
+        -- Process stereo interleaved data: skip every other pair to avoid L/R aliasing
+        for j = 1, #t, numChannels * 2 do
           local s = t[j] * itemVolume
-          sum = sum + s * s 
+          sum = sum + s * s
         end
-        levels[i+1] = math.sqrt(sum / #t)
+        levels[i+1] = math.sqrt(sum / math.max(1, math.floor(#t / (numChannels * 2))))
       else
         levels[i+1] = 0
       end
@@ -405,6 +415,7 @@ local function getRawWaveform(item, numSamples)
   local aa, aaStart, aaEnd, samplerate, itemLen = get_accessor_bounds(take)
   if not aa or samplerate <= 0 or itemLen <= 0 then if take then releaseAudioAccessor(take) end; return nil, 0 end
 
+  local numChannels = getSourceChannelCount(take)
   local data = {}
   local windowSize = itemLen / numSamples
 
@@ -414,12 +425,13 @@ local function getRawWaveform(item, numSamples)
     if numSamps <= 0 then
       data[i+1] = {pos=0, neg=0}
     else
-      local buf = getAudioBuffer(take, numSamps * 2)
+      local buf = getAudioBuffer(take, numSamps * numChannels * 2)
       buf.clear()
-      local read = reaper.GetAudioAccessorSamples(aa, samplerate, 1, readTime, numSamps, buf)
+      local read = reaper.GetAudioAccessorSamples(aa, samplerate, numChannels, readTime, numSamps, buf)
       if read > 0 then
         local pos, neg, t = 0, 0, buf.table()
-        for j = 1, #t do
+        -- Process stereo interleaved data: skip every other value to avoid L/R aliasing
+        for j = 1, #t, numChannels * 2 do
           local s = t[j] * itemVolume
           if s > pos then pos = s end
           if s < neg then neg = s end
@@ -435,7 +447,7 @@ local function getRawWaveform(item, numSamples)
   return data, linearTodB(itemVolume)
 end
 
-local function getAdjustedWaveform(item, numSamples, phrases, adjustments, peakCeiling, trim, preLimitBoost)
+local function getAdjustedWaveform(item, numSamples, phrases, adjustments, peakCeiling, trim)
   local take = reaper.GetActiveTake(item)
   if not take or reaper.TakeIsMIDI(take) then return nil, 0 end
   local itemVolume = reaper.GetMediaItemInfo_Value(item, "D_VOL")
@@ -443,10 +455,10 @@ local function getAdjustedWaveform(item, numSamples, phrases, adjustments, peakC
   local aa, aaStart, aaEnd, samplerate, itemLen = get_accessor_bounds(take)
   if not aa or samplerate <= 0 or itemLen <= 0 then if take then releaseAudioAccessor(take) end; return nil, 0 end
 
+  local numChannels = getSourceChannelCount(take)
   local data = {}
   local peakLin = peakCeiling < 0 and dBToLinear(peakCeiling) or math.huge
   local trimLin = dBToLinear(trim)
-  local preLimitLin = dBToLinear(preLimitBoost)
   local windowSize = itemLen / numSamples
 
   for i = 0, numSamples - 1 do
@@ -455,9 +467,9 @@ local function getAdjustedWaveform(item, numSamples, phrases, adjustments, peakC
     if numSamps <= 0 then
       data[i+1] = {pos=0, neg=0}
     else
-      local buf = getAudioBuffer(take, numSamps * 2)
+      local buf = getAudioBuffer(take, numSamps * numChannels * 2)
       buf.clear()
-      local read = reaper.GetAudioAccessorSamples(aa, samplerate, 1, readTime, numSamps, buf)
+      local read = reaper.GetAudioAccessorSamples(aa, samplerate, numChannels, readTime, numSamps, buf)
       if read > 0 then
         local itemTime = (readTime - aaStart)
         local volAdj = 1.0
@@ -466,8 +478,9 @@ local function getAdjustedWaveform(item, numSamples, phrases, adjustments, peakC
         end
         
         local pos, neg, t = 0, 0, buf.table()
-        for j = 1, #t do
-          local s = t[j] * itemVolume * volAdj * preLimitLin
+        -- Process stereo interleaved data: skip every other value to avoid L/R aliasing
+        for j = 1, #t, numChannels * 2 do
+          local s = t[j] * itemVolume * volAdj
           if math.abs(s) > peakLin then s = s > 0 and peakLin or -peakLin end
           s = s * trimLin
           if s > pos then pos = s end
