@@ -1095,7 +1095,6 @@ local function getPinnedWaveformRect(plotHeight)
   return x, y, width, height
 end
 
--- ===== Hotkey Handling =====
 local function handleHotkeys()
   -- Enter key: Apply changes
   if reaper.ImGui_IsKeyPressed(ctx, reaper.ImGui_Key_Enter()) then
@@ -1133,14 +1132,17 @@ local function handleHotkeys()
     reaper.UpdateArrange()
     statusMessage = string.format("Committed to %d item(s) | Apply: %.3fs", processed, totalApply)
   end
- -- Spacebar: Play/Pause (check when ImGui is not consuming input)
-  if not reaper.ImGui_IsAnyItemActive(ctx) and not reaper.ImGui_IsAnyItemHovered(ctx) then
-    if reaper.ImGui_IsKeyPressed(ctx, reaper.ImGui_Key_Space()) then
-      local isPlaying = reaper.GetPlayState() & 1 == 1
+  
+  -- Spacebar: Play/Pause
+  -- ReaImGui's IsKeyPressed will detect spacebar, but we only want to handle it
+  -- when ImGui doesn't have a text input field or other keyboard control active
+  if reaper.ImGui_IsKeyPressed(ctx, reaper.ImGui_Key_Space()) then
+    if not reaper.ImGui_IsAnyItemActive(ctx) then
+      local isPlaying = (reaper.GetPlayState() & 1) == 1
       if isPlaying then
-        reaper.Main_OnCommand(reaper.NamedCommandLookup("TRANSPORT_PAUSE"), 0)
+        reaper.Main_OnCommand(reaper.NamedCommandLookup("_NF_PLAY_STOP_PLAY_PAUSE"), 0)
       else
-        reaper.Main_OnCommand(reaper.NamedCommandLookup("TRANSPORT_PLAY"), 0)
+        reaper.Main_OnCommand(reaper.NamedCommandLookup("_NF_PLAY_STOP_PLAY_PAUSE"), 0)
       end
     end
   end
@@ -1173,7 +1175,6 @@ local function loop()
   if visible then
     if reaper.ImGui_IsKeyPressed(ctx, reaper.ImGui_Key_Escape()) then open = false end
     handleHotkeys()
-    
     local winW, winH = reaper.ImGui_GetWindowSize(ctx)
     if winH < 500 then
       local availW, availH = reaper.ImGui_GetContentRegionAvail(ctx)
