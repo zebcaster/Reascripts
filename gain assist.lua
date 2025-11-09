@@ -1922,7 +1922,7 @@ local function loop()
 
         if isDraggingMarker then
           if reaper.ImGui_IsMouseReleased(ctx, 0) then
-                          isDraggingMarker = false
+            isDraggingMarker = false
             local item = reaper.GetSelectedMediaItem(0, 0)
             if item then
               local take = reaper.GetActiveTake(item)
@@ -1941,14 +1941,28 @@ local function loop()
             local relX = (mouse_x - x) / w
             local samplePos = startSample + relX * visibleSamples
             local newTime = (samplePos / totalSamples) * itemLen
+            
             if draggedMarkerIdx and phrases[draggedMarkerIdx] then
-              newTime = math.max(phrases[draggedMarkerIdx].startTime + 0.05, math.min(newTime, phrases[draggedMarkerIdx + 1].endTime - 0.05))
+              -- Check if this is the first marker (edge marker at start)
+              if draggedMarkerIdx == 1 then
+                -- First marker: allow it to go all the way to 0
+                newTime = math.max(0, math.min(newTime, phrases[draggedMarkerIdx + 1].endTime - 0.05))
+              -- Check if this is the last marker (edge marker at end)
+              elseif draggedMarkerIdx == #phrases - 1 then
+                -- Last marker: allow it to go all the way to itemLen
+                newTime = math.max(phrases[draggedMarkerIdx].startTime + 0.05, math.min(newTime, itemLen))
+              else
+                -- Middle markers: keep minimum spacing of 0.05 on both sides
+                newTime = math.max(phrases[draggedMarkerIdx].startTime + 0.05, math.min(newTime, phrases[draggedMarkerIdx + 1].endTime - 0.05))
+              end
+              
               phrases[draggedMarkerIdx].endTime = newTime
               phrases[draggedMarkerIdx + 1].startTime = newTime
             end
             waveformNeedsRedraw, cacheValid = true, false
           end
         end
+        
 
         local tol = 6
         hoverPeakCeiling = false
