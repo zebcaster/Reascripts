@@ -1201,25 +1201,36 @@ local function loop()
   if not ctxInit then refreshWaveform(true); ctxInit = true end
   local visible, open = reaper.ImGui_Begin(ctx, 'Vocal Phrase Leveler', true, reaper.ImGui_WindowFlags_None())
   if visible then
+    
     if reaper.ImGui_IsKeyPressed(ctx, reaper.ImGui_Key_Escape()) then open = false end
     handleHotkeys()
     local winW, winH = reaper.ImGui_GetWindowSize(ctx)
-    if winH < 500 then
+    
+    -- Define height tiers for progressive control hiding
+    local MIN_HEIGHT_WAVEFORM_ONLY = 0
+    local MIN_HEIGHT_WITH_STATUS = 350
+    local MIN_HEIGHT_ONE_TAB = 500
+    
+    local showWaveform = winH >= MIN_HEIGHT_WAVEFORM_ONLY
+    local showStatus = winH >= MIN_HEIGHT_WITH_STATUS
+    local showTabs = winH >= MIN_HEIGHT_ONE_TAB
+    
+    if not showWaveform then
+      -- Window too small - show message
       local availW, availH = reaper.ImGui_GetContentRegionAvail(ctx)
       local msg = "Window too small - please increase height"
       local textW = reaper.ImGui_CalcTextSize(ctx, msg)
       reaper.ImGui_Dummy(ctx, (availW - textW) / 2, availH / 2 - 10)
       reaper.ImGui_SameLine(ctx)
       reaper.ImGui_Text(ctx, msg)
-      reaper.ImGui_End(ctx)
-    elseif winW < 400 then
+    elseif winW < 0 then
+      -- Window too narrow
       local availW, availH = reaper.ImGui_GetContentRegionAvail(ctx)
       local msg = "Window too small - please increase width"
       local textW = reaper.ImGui_CalcTextSize(ctx, msg)
       reaper.ImGui_Dummy(ctx, (availW - textW) / 2, availH / 2 - 10)
       reaper.ImGui_SameLine(ctx)
       reaper.ImGui_Text(ctx, msg)
-      reaper.ImGui_End(ctx)
     else
       if showHelpMenu then
         local helpVisible, helpOpen = reaper.ImGui_Begin(ctx, 'Help - Vocal Phrase Leveler', true)
@@ -1356,422 +1367,426 @@ local function loop()
           showHelpMenu = not showHelpMenu
         end
       end
-
-      reaper.ImGui_Spacing(ctx)
-      local minTabWidth = 350
-      if contentWidth < minTabWidth then
-        reaper.ImGui_Text(ctx, "Window too narrow for tab controls")
+      
+      if showTabs then
         reaper.ImGui_Spacing(ctx)
-      else
-        local tabButtonWidth = 100
-        local tabButtonGap = 0
-        local totalTabWidth = (tabButtonWidth * 3) + (tabButtonGap * 2)
-        local tabLeftPad = math.max(0, (contentWidth - totalTabWidth) / 2)
-        
-        reaper.ImGui_Dummy(ctx, tabLeftPad, 0)
-        reaper.ImGui_SameLine(ctx)
-        
-        local tabBg1 = tabState.currentTab == 1 and 0x4080FFFF or 0x404040FF
-        local tabBg2 = tabState.currentTab == 2 and 0x4080FFFF or 0x404040FF
-        local tabBg3 = tabState.currentTab == 3 and 0x4080FFFF or 0x404040FF
-        local tabText1 = tabState.currentTab == 1 and 0xFFFFFFFF or 0xAAAAAAAA
-        local tabText2 = tabState.currentTab == 2 and 0xFFFFFFFF or 0xAAAAAAAA
-        local tabText3 = tabState.currentTab == 3 and 0xFFFFFFFF or 0xAAAAAAAA
-        
-        local fg = reaper.ImGui_GetForegroundDrawList(ctx)
-        local tabX, tabY = reaper.ImGui_GetCursorScreenPos(ctx)
-        
-        reaper.ImGui_DrawList_AddRectFilled(fg, tabX, tabY, tabX + tabButtonWidth, tabY + 32, tabBg1, 4)
-        local textW1, textH1 = reaper.ImGui_CalcTextSize(ctx, "Level")
-        reaper.ImGui_DrawList_AddText(fg, tabX + (tabButtonWidth - textW1) / 2, tabY + (32 - textH1) / 2, tabText1, "Level")
-       
-        reaper.ImGui_DrawList_AddRectFilled(fg, tabX + tabButtonWidth, tabY, tabX + tabButtonWidth * 2, tabY + 32, tabBg2, 4)
-        local textW2, textH2 = reaper.ImGui_CalcTextSize(ctx, "Gate")
-        reaper.ImGui_DrawList_AddText(fg, tabX + tabButtonWidth + (tabButtonWidth - textW2) / 2, tabY + (32 - textH2) / 2, tabText2, "Gate")
-        
-        reaper.ImGui_DrawList_AddRectFilled(fg, tabX + tabButtonWidth * 2, tabY, tabX + tabButtonWidth * 3, tabY + 32, tabBg3, 4)
-        local textW3, textH3 = reaper.ImGui_CalcTextSize(ctx, "Display")
-        reaper.ImGui_DrawList_AddText(fg, tabX + tabButtonWidth * 2 + (tabButtonWidth - textW3) / 2, tabY + (32 - textH3) / 2, tabText3, "Display")
-        
-        reaper.ImGui_SetCursorScreenPos(ctx, tabX, tabY)
-        if reaper.ImGui_InvisibleButton(ctx, "tab1", tabButtonWidth, 32) then
-          tabState.currentTab = 1
-        end
-        reaper.ImGui_SameLine(ctx, 0, 0)
-        if reaper.ImGui_InvisibleButton(ctx, "tab2", tabButtonWidth, 32) then
-          tabState.currentTab = 2
-        end
-        reaper.ImGui_SameLine(ctx, 0, 0)
-        if reaper.ImGui_InvisibleButton(ctx, "tab3", tabButtonWidth, 32) then
-          tabState.currentTab = 3
-        end
-        
-        reaper.ImGui_Spacing(ctx)
-
-        if tabState.currentTab == 1 then
-          local gap = 28
-          local colWidth = math.max(220, math.min(360, (contentWidth - gap) / 2))
-          local totalControlsW = (colWidth * 2) + gap
-          local leftPad = math.max(0, (contentWidth - totalControlsW) / 2)
-
-          if contentWidth < 500 then
-            reaper.ImGui_Text(ctx, "Window too narrow for controls")
-            reaper.ImGui_Spacing(ctx)
-          else
-            reaper.ImGui_Dummy(ctx, leftPad, 0)
-            reaper.ImGui_SameLine(ctx)
-
-            reaper.ImGui_BeginChild(ctx, "controls_left_col", colWidth, 0, reaper.ImGui_WindowFlags_NoScrollbar())
-              reaper.ImGui_PushItemWidth(ctx, colWidth * 0.60)
-
-              local changed, newVal = reaper.ImGui_SliderDouble(ctx, "##separationSensitivity", separationSensitivity, 0.00, 0.95, "%.2f")
-              if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_IsMouseClicked(ctx, 1) then
-                if phrasesManualllyAdjusted then
-                  showManualAdjustmentWarning = true
-                  pendingSeparationSensitivity = DEFAULT_SEPARATION_SENSITIVITY
-                else
-                  separationSensitivity = DEFAULT_SEPARATION_SENSITIVITY
-                  statusMessage = "Separation Sensitivity reset"
-                  refreshWaveformWithDetection()
-                end
-              elseif changed then
-                if phrasesManualllyAdjusted then
-                  showManualAdjustmentWarning = true
-                  pendingSeparationSensitivity = newVal
-                else
-                  separationSensitivity = newVal
-                end
-              end
-              local isActive = reaper.ImGui_IsItemActive(ctx)
-              if sliderWasActive["separationSensitivity"] and not isActive then
-                if phrasesManualllyAdjusted then
-                  showManualAdjustmentWarning = true
-                  pendingSeparationSensitivity = separationSensitivity
-                else
-                  refreshWaveformWithDetection()
-                end
-              end
-              sliderWasActive["separationSensitivity"] = isActive
-              reaper.ImGui_SameLine(ctx)
-              reaper.ImGui_Text(ctx, "Separation (less → more)")
-              reaper.ImGui_Spacing(ctx)
-
-              changed, newVal = reaper.ImGui_SliderDouble(ctx, "##correctionStrength", correctionStrength, 0, 100, "%.0f")
-              if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_IsMouseClicked(ctx, 1) then
-                correctionStrength = DEFAULT_CORRECTION_STRENGTH
-                statusMessage = "Phrase Balancing reset"
-                refreshWaveformDisplay()
-              elseif changed then
-                correctionStrength = newVal
-              end
-              isActive = reaper.ImGui_IsItemActive(ctx)
-              if sliderWasActive["correctionStrength"] and not isActive then
-                refreshWaveformDisplay()
-              end
-              sliderWasActive["correctionStrength"] = isActive
-              reaper.ImGui_SameLine(ctx)
-              reaper.ImGui_Text(ctx, "Phrase Balancing (%)")
-              reaper.ImGui_Spacing(ctx)
-
-              changed, newVal = reaper.ImGui_SliderDouble(ctx, "##preLimitBoost", preLimitBoost, -12, 12, "%.1f")
-              if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_IsMouseClicked(ctx, 1) then
-                preLimitBoost = DEFAULT_PRE_LIMIT_BOOST
-                statusMessage = "Pre-Limit Boost reset"
-                refreshWaveformDisplay()
-              elseif changed then
-                preLimitBoost = newVal
-              end
-              isActive = reaper.ImGui_IsItemActive(ctx)
-              if sliderWasActive["preLimitBoost"] and not isActive then
-                refreshWaveformDisplay()
-              end
-              sliderWasActive["preLimitBoost"] = isActive
-              reaper.ImGui_SameLine(ctx)
-              reaper.ImGui_Text(ctx, "Pre-Limit Boost (dB)")
-
-              reaper.ImGui_PopItemWidth(ctx)
-            reaper.ImGui_EndChild(ctx)
-
-            reaper.ImGui_SameLine(ctx, 0, gap)
-
-            reaper.ImGui_BeginChild(ctx, "controls_right_col", colWidth, 0, reaper.ImGui_WindowFlags_NoScrollbar())
-              reaper.ImGui_PushItemWidth(ctx, colWidth * 0.60)
-
-              local changed2, newVal2 = reaper.ImGui_SliderDouble(ctx, "##resolutionMs", resolutionMs, 1, 50, "%.0f")
-              if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_IsMouseClicked(ctx, 1) then
-                resolutionMs = DEFAULT_RESOLUTION_MS
-                statusMessage = "Peak Smoothness reset"
-              elseif changed2 then
-                resolutionMs = newVal2
-                statusMessage = "Peak Smoothness changed"
-              end
-              reaper.ImGui_SameLine(ctx)
-              reaper.ImGui_Text(ctx, "Peak Smoothness (ms)")
-              reaper.ImGui_Spacing(ctx)
-              
-              changed2, newVal2 = reaper.ImGui_SliderDouble(ctx, "##peakCeiling", peakCeiling, -60, 0, "%.1f")
-              if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_IsMouseClicked(ctx, 1) then
-                peakCeiling = DEFAULT_PEAK_CEILING
-                statusMessage = "Peak Ceiling reset"
-                refreshWaveformDisplay()
-              elseif changed2 then
-                peakCeiling = newVal2
-              end
-              local isActive2 = reaper.ImGui_IsItemActive(ctx)
-              if sliderWasActive["peakCeiling"] and not isActive2 then
-                refreshWaveformDisplay()
-              end
-              sliderWasActive["peakCeiling"] = isActive2
-              reaper.ImGui_SameLine(ctx)
-              reaper.ImGui_Text(ctx, "Peak Ceiling (dB)")
-              reaper.ImGui_Spacing(ctx)
-              
-              changed2, newVal2 = reaper.ImGui_SliderDouble(ctx, "##trim", trim, -24, 24, "%.1f")
-              if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_IsMouseClicked(ctx, 1) then
-                trim = DEFAULT_TRIM
-                statusMessage = "Overall Trim reset"
-                refreshWaveformDisplay()
-              elseif changed2 then
-                trim = newVal2
-              end
-              isActive2 = reaper.ImGui_IsItemActive(ctx)
-              if sliderWasActive["trim"] and not isActive2 then
-                refreshWaveformDisplay()
-              end
-              sliderWasActive["trim"] = isActive2
-              reaper.ImGui_SameLine(ctx)
-              reaper.ImGui_Text(ctx, "Overall Trim (dB)")
-              reaper.ImGui_Spacing(ctx)
-              
-              reaper.ImGui_PopItemWidth(ctx)
-            reaper.ImGui_EndChild(ctx)
+        local minTabWidth = 350
+        if contentWidth < minTabWidth then
+          reaper.ImGui_Text(ctx, "Window too narrow for tab controls")
+          reaper.ImGui_Spacing(ctx)
+        else
+          local tabButtonWidth = 100
+          local tabButtonGap = 0
+          local totalTabWidth = (tabButtonWidth * 3) + (tabButtonGap * 2)
+          local tabLeftPad = math.max(0, (contentWidth - totalTabWidth) / 2)
+          
+          reaper.ImGui_Dummy(ctx, tabLeftPad, 0)
+          reaper.ImGui_SameLine(ctx)
+          
+          local tabBg1 = tabState.currentTab == 1 and 0x4080FFFF or 0x404040FF
+          local tabBg2 = tabState.currentTab == 2 and 0x4080FFFF or 0x404040FF
+          local tabBg3 = tabState.currentTab == 3 and 0x4080FFFF or 0x404040FF
+          local tabText1 = tabState.currentTab == 1 and 0xFFFFFFFF or 0xAAAAAAAA
+          local tabText2 = tabState.currentTab == 2 and 0xFFFFFFFF or 0xAAAAAAAA
+          local tabText3 = tabState.currentTab == 3 and 0xFFFFFFFF or 0xAAAAAAAA
+          
+          local fg = reaper.ImGui_GetForegroundDrawList(ctx)
+          local tabX, tabY = reaper.ImGui_GetCursorScreenPos(ctx)
+          
+          reaper.ImGui_DrawList_AddRectFilled(fg, tabX, tabY, tabX + tabButtonWidth, tabY + 32, tabBg1, 4)
+          local textW1, textH1 = reaper.ImGui_CalcTextSize(ctx, "Level")
+          reaper.ImGui_DrawList_AddText(fg, tabX + (tabButtonWidth - textW1) / 2, tabY + (32 - textH1) / 2, tabText1, "Level")
+         
+          reaper.ImGui_DrawList_AddRectFilled(fg, tabX + tabButtonWidth, tabY, tabX + tabButtonWidth * 2, tabY + 32, tabBg2, 4)
+          local textW2, textH2 = reaper.ImGui_CalcTextSize(ctx, "Gate")
+          reaper.ImGui_DrawList_AddText(fg, tabX + tabButtonWidth + (tabButtonWidth - textW2) / 2, tabY + (32 - textH2) / 2, tabText2, "Gate")
+          
+          reaper.ImGui_DrawList_AddRectFilled(fg, tabX + tabButtonWidth * 2, tabY, tabX + tabButtonWidth * 3, tabY + 32, tabBg3, 4)
+          local textW3, textH3 = reaper.ImGui_CalcTextSize(ctx, "Display")
+          reaper.ImGui_DrawList_AddText(fg, tabX + tabButtonWidth * 2 + (tabButtonWidth - textW3) / 2, tabY + (32 - textH3) / 2, tabText3, "Display")
+          
+          reaper.ImGui_SetCursorScreenPos(ctx, tabX, tabY)
+          if reaper.ImGui_InvisibleButton(ctx, "tab1", tabButtonWidth, 32) then
+            tabState.currentTab = 1
           end
-
-        elseif tabState.currentTab == 2 then
-          local gap = 28
-          local colWidth = math.max(220, math.min(360, (contentWidth - gap) / 2))
-          local totalControlsW = (colWidth * 2) + gap
-          local leftPad = math.max(0, (contentWidth - totalControlsW) / 2)
-        
-          if contentWidth < 500 then
-            reaper.ImGui_Text(ctx, "Window too narrow for gate controls")
-            reaper.ImGui_Spacing(ctx)
-          else
-            reaper.ImGui_Dummy(ctx, leftPad, 0)
-            reaper.ImGui_SameLine(ctx)
-        
-            reaper.ImGui_BeginChild(ctx, "gate_left_col", colWidth, 0, reaper.ImGui_WindowFlags_NoScrollbar())
-              reaper.ImGui_PushItemWidth(ctx, colWidth * 0.60)
-              
-              
-              reaper.ImGui_Dummy(ctx, 188, 0)
-              reaper.ImGui_SameLine(ctx)
-              local changed, newVal = reaper.ImGui_Checkbox(ctx, "##gateEnabled", gateEnabled)
-              if changed then
-                gateEnabled = newVal
-                refreshWaveformDisplay()
-              end
-              reaper.ImGui_SameLine(ctx)
-              reaper.ImGui_Text(ctx, "Gate Enabled")
-              reaper.ImGui_Spacing(ctx)
-        
-              changed, newVal = reaper.ImGui_SliderDouble(ctx, "##gateThreshold", gateThreshold, -80, -6, "%.1f")
-              if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_IsMouseClicked(ctx, 1) then
-                gateThreshold = DEFAULT_GATE_THRESHOLD
-                statusMessage = "Gate Threshold reset"
-                refreshWaveformDisplay()
-              elseif changed then
-                gateThreshold = newVal
-                clearGateEnvelopeCache()
-              end
-              local isActive = reaper.ImGui_IsItemActive(ctx)
-              if sliderWasActive["gateThreshold"] and not isActive then
-                refreshWaveformDisplay()
-              end
-              sliderWasActive["gateThreshold"] = isActive
-              reaper.ImGui_SameLine(ctx)
-              reaper.ImGui_Text(ctx, "Threshold (dB)")
-              reaper.ImGui_Spacing(ctx)
-        
-              changed, newVal = reaper.ImGui_SliderDouble(ctx, "##gateHoldTime", gateHoldTime, 0.05, 2.0, "%.2f")
-              if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_IsMouseClicked(ctx, 1) then
-                gateHoldTime = DEFAULT_GATE_HOLD_TIME
-                statusMessage = "Gate Hold Time reset"
-                refreshWaveformDisplay()
-              elseif changed then
-                gateHoldTime = newVal
-                clearGateEnvelopeCache()
-              end
-              isActive = reaper.ImGui_IsItemActive(ctx)
-              if sliderWasActive["gateHoldTime"] and not isActive then
-                refreshWaveformDisplay()
-              end
-              sliderWasActive["gateHoldTime"] = isActive
-              reaper.ImGui_SameLine(ctx)
-              reaper.ImGui_Text(ctx, "Hold Time (s)")
-        
-              reaper.ImGui_PopItemWidth(ctx)
-            reaper.ImGui_EndChild(ctx)
-        
-            reaper.ImGui_SameLine(ctx, 0, gap)
-        
-            reaper.ImGui_BeginChild(ctx, "gate_right_col", colWidth, 0, reaper.ImGui_WindowFlags_NoScrollbar())
-              reaper.ImGui_PushItemWidth(ctx, colWidth * 0.60)
-              reaper.ImGui_Spacing(ctx)
-              reaper.ImGui_Spacing(ctx)
-              reaper.ImGui_Spacing(ctx)
-              reaper.ImGui_Spacing(ctx)
-              reaper.ImGui_Spacing(ctx)
-              reaper.ImGui_Spacing(ctx)
-              reaper.ImGui_Spacing(ctx)
-              local changed2, newVal2 = reaper.ImGui_SliderDouble(ctx, "##gateReduction", gateReduction, -80, 0, "%.1f")
-              if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_IsMouseClicked(ctx, 1) then
-                gateReduction = DEFAULT_GATE_REDUCTION
-                statusMessage = "Gate Reduction reset"
-                refreshWaveformDisplay()
-              elseif changed2 then
-                gateReduction = newVal2
-                clearGateEnvelopeCache()
-              end
-              local isActive2 = reaper.ImGui_IsItemActive(ctx)
-              if sliderWasActive["gateReduction"] and not isActive2 then
-                refreshWaveformDisplay()
-              end
-              sliderWasActive["gateReduction"] = isActive2
-              reaper.ImGui_SameLine(ctx)
-              reaper.ImGui_Text(ctx, "Reduction (dB)")
-              reaper.ImGui_Spacing(ctx)
-        
-              changed2, newVal2 = reaper.ImGui_SliderDouble(ctx, "##gateOnsetTime", gateOnsetTime, 0.01, 0.5, "%.3f")
-              if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_IsMouseClicked(ctx, 1) then
-                gateOnsetTime = DEFAULT_GATE_ONSET_TIME
-                statusMessage = "Gate Onset Time reset"
-                refreshWaveformDisplay()
-              elseif changed2 then
-                gateOnsetTime = newVal2
-                clearGateEnvelopeCache()
-              end
-              isActive2 = reaper.ImGui_IsItemActive(ctx)
-              if sliderWasActive["gateOnsetTime"] and not isActive2 then
-                refreshWaveformDisplay()
-              end
-              sliderWasActive["gateOnsetTime"] = isActive2
-              reaper.ImGui_SameLine(ctx)
-              reaper.ImGui_Text(ctx, "Onset Time (s)")
-              reaper.ImGui_Spacing(ctx)
-        
-              reaper.ImGui_PopItemWidth(ctx)
-            reaper.ImGui_EndChild(ctx)
+          reaper.ImGui_SameLine(ctx, 0, 0)
+          if reaper.ImGui_InvisibleButton(ctx, "tab2", tabButtonWidth, 32) then
+            tabState.currentTab = 2
           end
-
-        elseif tabState.currentTab == 3 then
-          local gap = 28
-          local colWidth = math.max(220, math.min(360, (contentWidth - gap) / 2))
-          local totalControlsW = (colWidth * 2) + gap
-          local leftPad = math.max(0, (contentWidth - totalControlsW) / 2)
-        
-          if contentWidth < 500 then
-            reaper.ImGui_Text(ctx, "Window too narrow for display controls")
-            reaper.ImGui_Spacing(ctx)
-          else
-            reaper.ImGui_Dummy(ctx, leftPad, 0)
-            reaper.ImGui_SameLine(ctx)
-        
-            reaper.ImGui_BeginChild(ctx, "display_left_col", colWidth, 0, reaper.ImGui_WindowFlags_NoScrollbar())
-              reaper.ImGui_PushItemWidth(ctx, colWidth * 0.60)
-        
-              local changed, newVal = reaper.ImGui_SliderInt(ctx, "##numBars", numBars, 500, 10000)
-              if checkSliderDoubleClick("numBars") then
-                numBars = DEFAULT_NUM_BARS
-                setExtState("numBars", numBars)
-                statusMessage = "Waveform Resolution reset"
-                refreshWaveformDisplay()
-              elseif changed then
-                numBars = newVal
-                setExtState("numBars", numBars)
-              end
-              reaper.ImGui_SameLine(ctx)
-              reaper.ImGui_Text(ctx, "Waveform Resolution")
+          reaper.ImGui_SameLine(ctx, 0, 0)
+          if reaper.ImGui_InvisibleButton(ctx, "tab3", tabButtonWidth, 32) then
+            tabState.currentTab = 3
+          end
+          
+          reaper.ImGui_Spacing(ctx)
+  
+          if tabState.currentTab == 1 then
+            local gap = 28
+            local colWidth = math.max(220, math.min(360, (contentWidth - gap) / 2))
+            local totalControlsW = (colWidth * 2) + gap
+            local leftPad = math.max(0, (contentWidth - totalControlsW) / 2)
+  
+            if contentWidth < 500 then
+              reaper.ImGui_Text(ctx, "Window too narrow for controls")
               reaper.ImGui_Spacing(ctx)
-        
-              changed, newVal = reaper.ImGui_SliderInt(ctx, "##minDB", minDB, -150, -6)
-              if checkSliderDoubleClick("minDB") then
-                minDB = DEFAULT_MIN_DB
-                setExtState("minDB", minDB)
-                statusMessage = "Min dB reset"
-                refreshWaveformDisplay()
-              elseif changed then
-                minDB = newVal
-                setExtState("minDB", minDB)
-              end
+            else
+              reaper.ImGui_Dummy(ctx, leftPad, 0)
               reaper.ImGui_SameLine(ctx)
-              reaper.ImGui_Text(ctx, "Min dB")
+  
+              reaper.ImGui_BeginChild(ctx, "controls_left_col", colWidth, 0, reaper.ImGui_WindowFlags_NoScrollbar())
+                reaper.ImGui_PushItemWidth(ctx, colWidth * 0.60)
+  
+                local changed, newVal = reaper.ImGui_SliderDouble(ctx, "##separationSensitivity", separationSensitivity, 0.00, 0.95, "%.2f")
+                if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_IsMouseClicked(ctx, 1) then
+                  if phrasesManualllyAdjusted then
+                    showManualAdjustmentWarning = true
+                    pendingSeparationSensitivity = DEFAULT_SEPARATION_SENSITIVITY
+                  else
+                    separationSensitivity = DEFAULT_SEPARATION_SENSITIVITY
+                    statusMessage = "Separation Sensitivity reset"
+                    refreshWaveformWithDetection()
+                  end
+                elseif changed then
+                  if phrasesManualllyAdjusted then
+                    showManualAdjustmentWarning = true
+                    pendingSeparationSensitivity = newVal
+                  else
+                    separationSensitivity = newVal
+                  end
+                end
+                local isActive = reaper.ImGui_IsItemActive(ctx)
+                if sliderWasActive["separationSensitivity"] and not isActive then
+                  if phrasesManualllyAdjusted then
+                    showManualAdjustmentWarning = true
+                    pendingSeparationSensitivity = separationSensitivity
+                  else
+                    refreshWaveformWithDetection()
+                  end
+                end
+                sliderWasActive["separationSensitivity"] = isActive
+                reaper.ImGui_SameLine(ctx)
+                reaper.ImGui_Text(ctx, "Separation (less → more)")
+                reaper.ImGui_Spacing(ctx)
+  
+                changed, newVal = reaper.ImGui_SliderDouble(ctx, "##correctionStrength", correctionStrength, 0, 100, "%.0f")
+                if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_IsMouseClicked(ctx, 1) then
+                  correctionStrength = DEFAULT_CORRECTION_STRENGTH
+                  statusMessage = "Phrase Balancing reset"
+                  refreshWaveformDisplay()
+                elseif changed then
+                  correctionStrength = newVal
+                end
+                isActive = reaper.ImGui_IsItemActive(ctx)
+                if sliderWasActive["correctionStrength"] and not isActive then
+                  refreshWaveformDisplay()
+                end
+                sliderWasActive["correctionStrength"] = isActive
+                reaper.ImGui_SameLine(ctx)
+                reaper.ImGui_Text(ctx, "Phrase Balancing (%)")
+                reaper.ImGui_Spacing(ctx)
+  
+                changed, newVal = reaper.ImGui_SliderDouble(ctx, "##preLimitBoost", preLimitBoost, -12, 12, "%.1f")
+                if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_IsMouseClicked(ctx, 1) then
+                  preLimitBoost = DEFAULT_PRE_LIMIT_BOOST
+                  statusMessage = "Pre-Limit Boost reset"
+                  refreshWaveformDisplay()
+                elseif changed then
+                  preLimitBoost = newVal
+                end
+                isActive = reaper.ImGui_IsItemActive(ctx)
+                if sliderWasActive["preLimitBoost"] and not isActive then
+                  refreshWaveformDisplay()
+                end
+                sliderWasActive["preLimitBoost"] = isActive
+                reaper.ImGui_SameLine(ctx)
+                reaper.ImGui_Text(ctx, "Pre-Limit Boost (dB)")
+  
+                reaper.ImGui_PopItemWidth(ctx)
+              reaper.ImGui_EndChild(ctx)
+  
+              reaper.ImGui_SameLine(ctx, 0, gap)
+  
+              reaper.ImGui_BeginChild(ctx, "controls_right_col", colWidth, 0, reaper.ImGui_WindowFlags_NoScrollbar())
+                reaper.ImGui_PushItemWidth(ctx, colWidth * 0.60)
+  
+                local changed2, newVal2 = reaper.ImGui_SliderDouble(ctx, "##resolutionMs", resolutionMs, 1, 50, "%.0f")
+                if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_IsMouseClicked(ctx, 1) then
+                  resolutionMs = DEFAULT_RESOLUTION_MS
+                  statusMessage = "Peak Smoothness reset"
+                elseif changed2 then
+                  resolutionMs = newVal2
+                  statusMessage = "Peak Smoothness changed"
+                end
+                reaper.ImGui_SameLine(ctx)
+                reaper.ImGui_Text(ctx, "Peak Smoothness (ms)")
+                reaper.ImGui_Spacing(ctx)
+                
+                changed2, newVal2 = reaper.ImGui_SliderDouble(ctx, "##peakCeiling", peakCeiling, -60, 0, "%.1f")
+                if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_IsMouseClicked(ctx, 1) then
+                  peakCeiling = DEFAULT_PEAK_CEILING
+                  statusMessage = "Peak Ceiling reset"
+                  refreshWaveformDisplay()
+                elseif changed2 then
+                  peakCeiling = newVal2
+                end
+                local isActive2 = reaper.ImGui_IsItemActive(ctx)
+                if sliderWasActive["peakCeiling"] and not isActive2 then
+                  refreshWaveformDisplay()
+                end
+                sliderWasActive["peakCeiling"] = isActive2
+                reaper.ImGui_SameLine(ctx)
+                reaper.ImGui_Text(ctx, "Peak Ceiling (dB)")
+                reaper.ImGui_Spacing(ctx)
+                
+                changed2, newVal2 = reaper.ImGui_SliderDouble(ctx, "##trim", trim, -24, 24, "%.1f")
+                if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_IsMouseClicked(ctx, 1) then
+                  trim = DEFAULT_TRIM
+                  statusMessage = "Overall Trim reset"
+                  refreshWaveformDisplay()
+                elseif changed2 then
+                  trim = newVal2
+                end
+                isActive2 = reaper.ImGui_IsItemActive(ctx)
+                if sliderWasActive["trim"] and not isActive2 then
+                  refreshWaveformDisplay()
+                end
+                sliderWasActive["trim"] = isActive2
+                reaper.ImGui_SameLine(ctx)
+                reaper.ImGui_Text(ctx, "Overall Trim (dB)")
+                reaper.ImGui_Spacing(ctx)
+                
+                reaper.ImGui_PopItemWidth(ctx)
+              reaper.ImGui_EndChild(ctx)
+            end
+  
+          elseif tabState.currentTab == 2 then
+            local gap = 28
+            local colWidth = math.max(220, math.min(360, (contentWidth - gap) / 2))
+            local totalControlsW = (colWidth * 2) + gap
+            local leftPad = math.max(0, (contentWidth - totalControlsW) / 2)
+          
+            if contentWidth < 500 then
+              reaper.ImGui_Text(ctx, "Window too narrow for gate controls")
               reaper.ImGui_Spacing(ctx)
-        
-              changed, newVal = reaper.ImGui_SliderInt(ctx, "##maxDB", maxDB, -24, 0)
-              if checkSliderDoubleClick("maxDB") then
-                maxDB = DEFAULT_MAX_DB
-                setExtState("maxDB", maxDB)
-                statusMessage = "Max dB reset"
-                refreshWaveformDisplay()
-              elseif changed then
-                maxDB = newVal
-                setExtState("maxDB", maxDB)
-              end
+            else
+              reaper.ImGui_Dummy(ctx, leftPad, 0)
               reaper.ImGui_SameLine(ctx)
-              reaper.ImGui_Text(ctx, "Max dB")
-        
-              reaper.ImGui_PopItemWidth(ctx)
-            reaper.ImGui_EndChild(ctx)
-        
-            reaper.ImGui_SameLine(ctx, 0, gap)
-        
-            reaper.ImGui_BeginChild(ctx, "display_right_col", colWidth, 0, reaper.ImGui_WindowFlags_NoScrollbar())
-              reaper.ImGui_PushItemWidth(ctx, colWidth * 0.60)
-        
-              local changed, newVal = reaper.ImGui_SliderDouble(ctx, "##curvePower", curvePower, 1.0, 20.0, "%.1f")
-              if checkSliderDoubleClick("curvePower") then
-                curvePower = DEFAULT_CURVE_POWER
-                setExtState("curvePower", curvePower)
-                statusMessage = "Curve Power reset"
-                refreshWaveformDisplay()
-              elseif changed then
-                curvePower = newVal
-                setExtState("curvePower", curvePower)
-              end
-              reaper.ImGui_SameLine(ctx)
-              reaper.ImGui_Text(ctx, "Curve Power")
+          
+              reaper.ImGui_BeginChild(ctx, "gate_left_col", colWidth, 0, reaper.ImGui_WindowFlags_NoScrollbar())
+                reaper.ImGui_PushItemWidth(ctx, colWidth * 0.60)
+                
+                
+                reaper.ImGui_Dummy(ctx, 188, 0)
+                reaper.ImGui_SameLine(ctx)
+                local changed, newVal = reaper.ImGui_Checkbox(ctx, "##gateEnabled", gateEnabled)
+                if changed then
+                  gateEnabled = newVal
+                  refreshWaveformDisplay()
+                end
+                reaper.ImGui_SameLine(ctx)
+                reaper.ImGui_Text(ctx, "Gate Enabled")
+                reaper.ImGui_Spacing(ctx)
+          
+                changed, newVal = reaper.ImGui_SliderDouble(ctx, "##gateThreshold", gateThreshold, -80, -6, "%.1f")
+                if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_IsMouseClicked(ctx, 1) then
+                  gateThreshold = DEFAULT_GATE_THRESHOLD
+                  statusMessage = "Gate Threshold reset"
+                  refreshWaveformDisplay()
+                elseif changed then
+                  gateThreshold = newVal
+                  clearGateEnvelopeCache()
+                end
+                local isActive = reaper.ImGui_IsItemActive(ctx)
+                if sliderWasActive["gateThreshold"] and not isActive then
+                  refreshWaveformDisplay()
+                end
+                sliderWasActive["gateThreshold"] = isActive
+                reaper.ImGui_SameLine(ctx)
+                reaper.ImGui_Text(ctx, "Threshold (dB)")
+                reaper.ImGui_Spacing(ctx)
+          
+                changed, newVal = reaper.ImGui_SliderDouble(ctx, "##gateHoldTime", gateHoldTime, 0.05, 2.0, "%.2f")
+                if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_IsMouseClicked(ctx, 1) then
+                  gateHoldTime = DEFAULT_GATE_HOLD_TIME
+                  statusMessage = "Gate Hold Time reset"
+                  refreshWaveformDisplay()
+                elseif changed then
+                  gateHoldTime = newVal
+                  clearGateEnvelopeCache()
+                end
+                isActive = reaper.ImGui_IsItemActive(ctx)
+                if sliderWasActive["gateHoldTime"] and not isActive then
+                  refreshWaveformDisplay()
+                end
+                sliderWasActive["gateHoldTime"] = isActive
+                reaper.ImGui_SameLine(ctx)
+                reaper.ImGui_Text(ctx, "Hold Time (s)")
+          
+                reaper.ImGui_PopItemWidth(ctx)
+              reaper.ImGui_EndChild(ctx)
+          
+              reaper.ImGui_SameLine(ctx, 0, gap)
+          
+              reaper.ImGui_BeginChild(ctx, "gate_right_col", colWidth, 0, reaper.ImGui_WindowFlags_NoScrollbar())
+                reaper.ImGui_PushItemWidth(ctx, colWidth * 0.60)
+                reaper.ImGui_Spacing(ctx)
+                reaper.ImGui_Spacing(ctx)
+                reaper.ImGui_Spacing(ctx)
+                reaper.ImGui_Spacing(ctx)
+                reaper.ImGui_Spacing(ctx)
+                reaper.ImGui_Spacing(ctx)
+                reaper.ImGui_Spacing(ctx)
+                local changed2, newVal2 = reaper.ImGui_SliderDouble(ctx, "##gateReduction", gateReduction, -80, 0, "%.1f")
+                if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_IsMouseClicked(ctx, 1) then
+                  gateReduction = DEFAULT_GATE_REDUCTION
+                  statusMessage = "Gate Reduction reset"
+                  refreshWaveformDisplay()
+                elseif changed2 then
+                  gateReduction = newVal2
+                  clearGateEnvelopeCache()
+                end
+                local isActive2 = reaper.ImGui_IsItemActive(ctx)
+                if sliderWasActive["gateReduction"] and not isActive2 then
+                  refreshWaveformDisplay()
+                end
+                sliderWasActive["gateReduction"] = isActive2
+                reaper.ImGui_SameLine(ctx)
+                reaper.ImGui_Text(ctx, "Reduction (dB)")
+                reaper.ImGui_Spacing(ctx)
+          
+                changed2, newVal2 = reaper.ImGui_SliderDouble(ctx, "##gateOnsetTime", gateOnsetTime, 0.01, 0.5, "%.3f")
+                if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_IsMouseClicked(ctx, 1) then
+                  gateOnsetTime = DEFAULT_GATE_ONSET_TIME
+                  statusMessage = "Gate Onset Time reset"
+                  refreshWaveformDisplay()
+                elseif changed2 then
+                  gateOnsetTime = newVal2
+                  clearGateEnvelopeCache()
+                end
+                isActive2 = reaper.ImGui_IsItemActive(ctx)
+                if sliderWasActive["gateOnsetTime"] and not isActive2 then
+                  refreshWaveformDisplay()
+                end
+                sliderWasActive["gateOnsetTime"] = isActive2
+                reaper.ImGui_SameLine(ctx)
+                reaper.ImGui_Text(ctx, "Onset Time (s)")
+                reaper.ImGui_Spacing(ctx)
+          
+                reaper.ImGui_PopItemWidth(ctx)
+              reaper.ImGui_EndChild(ctx)
+            end
+  
+          elseif tabState.currentTab == 3 then
+            local gap = 28
+            local colWidth = math.max(220, math.min(360, (contentWidth - gap) / 2))
+            local totalControlsW = (colWidth * 2) + gap
+            local leftPad = math.max(0, (contentWidth - totalControlsW) / 2)
+          
+            if contentWidth < 500 then
+              reaper.ImGui_Text(ctx, "Window too narrow for display controls")
               reaper.ImGui_Spacing(ctx)
-        
-              changed, newVal = reaper.ImGui_SliderDouble(ctx, "##rawWaveformOpacity", rawWaveformOpacity, 0, 100, "%.0f%%")
-              if checkSliderDoubleClick("rawWaveformOpacity") then
-                rawWaveformOpacity = DEFAULT_RAW_WAVEFORM_OPACITY
-                statusMessage = "Raw Waveform Opacity reset"
-                refreshWaveformDisplay()
-              elseif changed then
-                rawWaveformOpacity = newVal
-              end
+            else
+              reaper.ImGui_Dummy(ctx, leftPad, 0)
               reaper.ImGui_SameLine(ctx)
-              reaper.ImGui_Text(ctx, "Raw Waveform Opacity")
-              reaper.ImGui_Spacing(ctx)
-        
-              -- NEW: Gate Overlay Opacity slider (right below raw waveform opacity)
-              changed, newVal = reaper.ImGui_SliderDouble(ctx, "##gateOverlayOpacity", gateOverlayOpacity, 0, 100, "%.0f%%")
-              if checkSliderDoubleClick("gateOverlayOpacity") then
-                gateOverlayOpacity = DEFAULT_GATE_OVERLAY_OPACITY
-                statusMessage = "Gate Overlay Opacity reset"
-                waveformNeedsRedraw = true
-              elseif changed then
-                gateOverlayOpacity = newVal
-                waveformNeedsRedraw = true
-              end
-              reaper.ImGui_SameLine(ctx)
-              reaper.ImGui_Text(ctx, "Gate Overlay Opacity")
-        
-              reaper.ImGui_PopItemWidth(ctx)
-            reaper.ImGui_EndChild(ctx)
+          
+              reaper.ImGui_BeginChild(ctx, "display_left_col", colWidth, 0, reaper.ImGui_WindowFlags_NoScrollbar())
+                reaper.ImGui_PushItemWidth(ctx, colWidth * 0.60)
+          
+                local changed, newVal = reaper.ImGui_SliderInt(ctx, "##numBars", numBars, 500, 10000)
+                if checkSliderDoubleClick("numBars") then
+                  numBars = DEFAULT_NUM_BARS
+                  setExtState("numBars", numBars)
+                  statusMessage = "Waveform Resolution reset"
+                  refreshWaveformDisplay()
+                elseif changed then
+                  numBars = newVal
+                  setExtState("numBars", numBars)
+                end
+                reaper.ImGui_SameLine(ctx)
+                reaper.ImGui_Text(ctx, "Waveform Resolution")
+                reaper.ImGui_Spacing(ctx)
+          
+                changed, newVal = reaper.ImGui_SliderInt(ctx, "##minDB", minDB, -150, -6)
+                if checkSliderDoubleClick("minDB") then
+                  minDB = DEFAULT_MIN_DB
+                  setExtState("minDB", minDB)
+                  statusMessage = "Min dB reset"
+                  refreshWaveformDisplay()
+                elseif changed then
+                  minDB = newVal
+                  setExtState("minDB", minDB)
+                end
+                reaper.ImGui_SameLine(ctx)
+                reaper.ImGui_Text(ctx, "Min dB")
+                reaper.ImGui_Spacing(ctx)
+          
+                changed, newVal = reaper.ImGui_SliderInt(ctx, "##maxDB", maxDB, -24, 0)
+                if checkSliderDoubleClick("maxDB") then
+                  maxDB = DEFAULT_MAX_DB
+                  setExtState("maxDB", maxDB)
+                  statusMessage = "Max dB reset"
+                  refreshWaveformDisplay()
+                elseif changed then
+                  maxDB = newVal
+                  setExtState("maxDB", maxDB)
+                end
+                reaper.ImGui_SameLine(ctx)
+                reaper.ImGui_Text(ctx, "Max dB")
+          
+                reaper.ImGui_PopItemWidth(ctx)
+              reaper.ImGui_EndChild(ctx)
+          
+              reaper.ImGui_SameLine(ctx, 0, gap)
+          
+              reaper.ImGui_BeginChild(ctx, "display_right_col", colWidth, 0, reaper.ImGui_WindowFlags_NoScrollbar())
+                reaper.ImGui_PushItemWidth(ctx, colWidth * 0.60)
+          
+                local changed, newVal = reaper.ImGui_SliderDouble(ctx, "##curvePower", curvePower, 1.0, 20.0, "%.1f")
+                if checkSliderDoubleClick("curvePower") then
+                  curvePower = DEFAULT_CURVE_POWER
+                  setExtState("curvePower", curvePower)
+                  statusMessage = "Curve Power reset"
+                  refreshWaveformDisplay()
+                elseif changed then
+                  curvePower = newVal
+                  setExtState("curvePower", curvePower)
+                end
+                reaper.ImGui_SameLine(ctx)
+                reaper.ImGui_Text(ctx, "Curve Power")
+                reaper.ImGui_Spacing(ctx)
+          
+                changed, newVal = reaper.ImGui_SliderDouble(ctx, "##rawWaveformOpacity", rawWaveformOpacity, 0, 100, "%.0f%%")
+                if checkSliderDoubleClick("rawWaveformOpacity") then
+                  rawWaveformOpacity = DEFAULT_RAW_WAVEFORM_OPACITY
+                  statusMessage = "Raw Waveform Opacity reset"
+                  refreshWaveformDisplay()
+                elseif changed then
+                  rawWaveformOpacity = newVal
+                end
+                reaper.ImGui_SameLine(ctx)
+                reaper.ImGui_Text(ctx, "Raw Waveform Opacity")
+                reaper.ImGui_Spacing(ctx)
+          
+                -- NEW: Gate Overlay Opacity slider (right below raw waveform opacity)
+                changed, newVal = reaper.ImGui_SliderDouble(ctx, "##gateOverlayOpacity", gateOverlayOpacity, 0, 100, "%.0f%%")
+                if checkSliderDoubleClick("gateOverlayOpacity") then
+                  gateOverlayOpacity = DEFAULT_GATE_OVERLAY_OPACITY
+                  statusMessage = "Gate Overlay Opacity reset"
+                  waveformNeedsRedraw = true
+                elseif changed then
+                  gateOverlayOpacity = newVal
+                  waveformNeedsRedraw = true
+                end
+                reaper.ImGui_SameLine(ctx)
+                reaper.ImGui_Text(ctx, "Gate Overlay Opacity")
+          
+                reaper.ImGui_PopItemWidth(ctx)
+              reaper.ImGui_EndChild(ctx)
+            end
           end
         end
+      elseif showControls then
+        reaper.ImGui_Text(ctx, "Waveform visible | Scroll down for controls")
       end
 
       if waveformData and #waveformData > 0 then
