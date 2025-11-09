@@ -12,7 +12,7 @@ end
 local SCRIPT_NAME = "Vocal Phrase Leveler with Preview"
 local DEFAULT_PEAK_CEILING = 0
 local DEFAULT_CORRECTION_STRENGTH = 0
-local DEFAULT_SEPARATION_SENSITIVITY = 0.15
+local DEFAULT_SEPARATION_SENSITIVITY = 0.00
 local DEFAULT_TRIM = 0
 local DEFAULT_PRE_LIMIT_BOOST = 0
 local DEFAULT_NUM_BARS = 10000
@@ -994,7 +994,7 @@ local function refreshWaveformDisplay()
   if not item or not phrases then return end
   adjustments = calculateVolumeAdjustments(phrases, correctionStrength / 100, preLimitBoost)
   waveformData = getAdjustedWaveform(item, numBars, phrases, adjustments, peakCeiling, trim, preLimitBoost)
-  rawWaveformData = getRawWaveform(item, numBars) 
+  rawWaveformData = getRawWaveform(item, numBars)
   -- Generate gate points for visualization
   if gateEnabled then
     local take = reaper.GetActiveTake(item)
@@ -1009,33 +1009,6 @@ local function refreshWaveformDisplay()
   cacheValid = false
 end
 
-local function refreshWaveformWithDetection()
-  local item = reaper.GetSelectedMediaItem(0, 0)
-  if not item then return end
-  local take = reaper.GetActiveTake(item)
-  if not take then return end
-
-  local newPhrases, ptime = detectPhrases(take, item, separationSensitivity)
-  phrases = newPhrases
-  phrasesManualllyAdjusted = false
-  phraseDetectionTime = ptime or 0
-
-  if phrases then
-    adjustments = calculateVolumeAdjustments(phrases, correctionStrength / 100, preLimitBoost)
-    waveformData = getAdjustedWaveform(item, numBars, phrases, adjustments, peakCeiling, trim, preLimitBoost)
-    rawWaveformData = getRawWaveform(item, numBars) 
-    -- Generate gate points for visualization
-    if gateEnabled then
-      gatePoints = getCachedGateEnvelope(take, item, gateThreshold, gateHoldTime, gateReduction, gateOnsetTime)
-    else
-      gatePoints = nil
-    end
-  end
-
-  waveformNeedsRedraw = true
-  cacheValid = false
-end
-
 local function refreshWaveform(forceRedetect)
   local t0 = reaper.time_precise()
   local item = reaper.GetSelectedMediaItem(0, 0)
@@ -1044,35 +1017,90 @@ local function refreshWaveform(forceRedetect)
   if take then itemName = reaper.GetTakeName(take) end
 
   local detectionTime = 0
-  if forceRedetect or not phrases then
+  
+  -- Skip detection if separation is 0 (unless phrases already exist with entries)
+  if separationSensitivity == 0 and (not phrases or #phrases == 0) then
+    phrases = {}
+    phraseDetectionTime = 0
+  -- Run detection if: forced, first time (phrases is nil), OR phrases exist
+  elseif forceRedetect or not phrases or (phrases and #phrases > 0) then
     local detectionStart = reaper.time_precise()
     local newPhrases, ptime = detectPhrases(take, item, separationSensitivity)
     phrases, phraseDetectionTime = newPhrases, (ptime or 0)
     detectionTime = reaper.time_precise() - detectionStart
   end
+  -- Otherwise skip detection (phrases exist and are empty)
 
-  if phrases then
+  -- Always get raw waveform
+  rawWaveformData = getRawWaveform(item, numBars)
+  
+  if phrases and #phrases > 0 then
+    -- Have phrases: calculate volume adjustments for each phrase
     adjustments = calculateVolumeAdjustments(phrases, correctionStrength / 100, preLimitBoost)
     waveformData = getAdjustedWaveform(item, numBars, phrases, adjustments, peakCeiling, trim, preLimitBoost)
-    rawWaveformData = getRawWaveform(item, numBars) 
-    -- Generate gate points for visualization
-    if gateEnabled then
-      gatePoints = getCachedGateEnvelope(take, item, gateThreshold, gateHoldTime, gateReduction, gateOnsetTime)
-    else
-      gatePoints = nil
-    end
-    lastAudioCalcTime = reaper.time_precise() - t0
-    if detectionTime > 0 then
-      statusMessage = string.format("Audio: %.3fs | Detect: %.3fs | Total: %.3fs", lastAudioCalcTime - detectionTime, detectionTime, lastAudioCalcTime)
-    else
-      statusMessage = string.format("Audio: %.3fs", lastAudioCalcTime)
-    end
   else
-    waveformData, rawWaveformData = nil, nil
-    lastAudioCalcTime = reaper.time_precise() - t0
-    statusMessage = "No audio detected - " .. string.format("%.3fs", lastAudioCalcTime)
+    -- No phrases: skip phrase-based adjustments, but still apply peak/trim/gate
+    adjustments = {}
+    waveformData = getAdjustedWaveform(item, numBars, {}, {}, peakCeiling, trim, preLimitBoost)
   end
+  
+  -- Generate gate points for visualization
+  if gateEnabled then
+    gatePoints = getCachedGateEnvelope(take, item, gateThreshold, gateHoldTime, gateReduction, gateOnsetTime)
+  else
+    gatePoints = nil
+  end
+  
+  lastAudioCalcTime = reaper.time_precise() - t0
+  if detectionTime > 0 then
+    statusMessage = string.format("Audio: %.3fs | Detect: %.3fs | Total: %.3fs", lastAudioCalcTime - detectionTime, detectionTime, lastAudioCalcTime)
+  else
+    statusMessage = string.format("Audio: %.3fs", lastAudioCalcTime)
+  end
+  
   waveformNeedsRedraw, waveformRendered, cacheValid = true, false, false
+end
+
+local function refreshWaveformWithDetection()
+  local item = reaper.GetSelectedMediaItem(0, 0)
+  if not item then return end
+  local take = reaper.GetActiveTake(item)
+  if not take then return end
+
+  -- Skip detection if separation is 0 and no phrases exist
+  if separationSensitivity == 0 then
+    phrases = {}
+    phraseDetectionTime = 0
+  else
+    local newPhrases, ptime = detectPhrases(take, item, separationSensitivity)
+    phrases = newPhrases
+    phraseDetectionTime = ptime or 0
+  end
+  
+  phrasesManualllyAdjusted = false
+
+  -- Always get raw waveform
+  rawWaveformData = getRawWaveform(item, numBars)
+  
+  if phrases and #phrases > 0 then
+    -- Have phrases: calculate volume adjustments for each phrase
+    adjustments = calculateVolumeAdjustments(phrases, correctionStrength / 100, preLimitBoost)
+    waveformData = getAdjustedWaveform(item, numBars, phrases, adjustments, peakCeiling, trim, preLimitBoost)
+  else
+    -- No phrases: skip phrase-based adjustments, but still apply peak/trim/gate
+    adjustments = {}
+    waveformData = getAdjustedWaveform(item, numBars, {}, {}, peakCeiling, trim, preLimitBoost)
+  end
+  
+  -- Generate gate points for visualization
+  if gateEnabled then
+    gatePoints = getCachedGateEnvelope(take, item, gateThreshold, gateHoldTime, gateReduction, gateOnsetTime)
+  else
+    gatePoints = nil
+  end
+
+  waveformNeedsRedraw = true
+  cacheValid = false
 end
 
 local function getPinnedWaveformRect(plotHeight)
@@ -1319,21 +1347,6 @@ local function loop()
         end
         reaper.ImGui_SameLine(ctx, 0, buttonSpacing)
         
-        --if reaper.ImGui_Button(ctx, "Reset Volume", 90, 25) then
-          --peakCeiling, correctionStrength, preLimitBoost, trim = 0, 0, 0, 0
-          --waveformNeedsRedraw = true
-          --cacheValid = false
-          --refreshWaveform()
-          --statusMessage = "All volume controls reset to 0"
-        --end
-        --reaper.ImGui_SameLine(ctx, 0, buttonSpacing)
-        
-        --if reaper.ImGui_Button(ctx, "Reset Separation", 150, 25) then
-          --refreshWaveformWithDetection()
-          --statusMessage = "Phrase separation reset"
-        --end
-        --reaper.ImGui_SameLine(ctx, 0, buttonSpacing)
-        
         if reaper.ImGui_Button(ctx, "Refresh", 100, 25) then
           refreshWaveform(true); zoomLevel, zoomCenter = 1.0, 0.5
         end
@@ -1411,7 +1424,7 @@ local function loop()
             reaper.ImGui_BeginChild(ctx, "controls_left_col", colWidth, 0, reaper.ImGui_WindowFlags_NoScrollbar())
               reaper.ImGui_PushItemWidth(ctx, colWidth * 0.60)
 
-              local changed, newVal = reaper.ImGui_SliderDouble(ctx, "##separationSensitivity", separationSensitivity, 0.05, 0.95, "%.2f")
+              local changed, newVal = reaper.ImGui_SliderDouble(ctx, "##separationSensitivity", separationSensitivity, 0.00, 0.95, "%.2f")
               if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_IsMouseClicked(ctx, 1) then
                 if phrasesManualllyAdjusted then
                   showManualAdjustmentWarning = true
@@ -1549,7 +1562,10 @@ local function loop()
         
             reaper.ImGui_BeginChild(ctx, "gate_left_col", colWidth, 0, reaper.ImGui_WindowFlags_NoScrollbar())
               reaper.ImGui_PushItemWidth(ctx, colWidth * 0.60)
-        
+              
+              
+              reaper.ImGui_Dummy(ctx, 188, 0)
+              reaper.ImGui_SameLine(ctx)
               local changed, newVal = reaper.ImGui_Checkbox(ctx, "##gateEnabled", gateEnabled)
               if changed then
                 gateEnabled = newVal
@@ -1769,6 +1785,42 @@ local function loop()
 
         local mouse_x, mouse_y = reaper.ImGui_GetMousePos(ctx)
         local isInside = (mouse_x >= x and mouse_x <= x + w and mouse_y >= y and mouse_y <= y + h)
+        -- Check if mouse is near any phrase marker
+        local nearMarker = false
+        for _, marker in ipairs(phraseMarkerPositions) do
+          local dx, dy = mouse_x - marker.x, mouse_y - marker.y
+          if (dx*dx + dy*dy) <= (8*8) then
+            nearMarker = true
+            break
+          end
+        end
+        
+        -- LEFT CLICK on waveform (when not interacting with other elements or markers)
+        if isInside and reaper.ImGui_IsMouseClicked(ctx, 0) and not isDragging and not isDraggingMarker and not isDraggingPeakCeiling and not isErasing and not nearMarker then
+          local item = reaper.GetSelectedMediaItem(0, 0)
+          if item then
+            local take = reaper.GetActiveTake(item)
+            if take then
+              local aa, aaStart, aaEnd, samplerate, itemLen = get_accessor_bounds(take)
+              if aa then
+                -- Calculate which sample was clicked
+                local relX = (mouse_x - x) / w
+                local samplePos = startSample + relX * visibleSamples
+                local clickTime = (samplePos / totalSamples) * itemLen
+                
+                -- Get item position in project
+                local itemStart = reaper.GetMediaItemInfo_Value(item, "D_POSITION")
+                
+                -- Set edit cursor to the clicked position
+                local cursorPos = itemStart + clickTime
+                reaper.SetEditCurPos(cursorPos, false, false)
+                
+                statusMessage = string.format("Edit cursor set to %.3f", cursorPos)
+              end
+            end
+          end
+        end
+        
         local isMouseClicked = reaper.ImGui_IsMouseClicked(ctx, 0)
         local isRightClicked = reaper.ImGui_IsMouseClicked(ctx, 1)
 
