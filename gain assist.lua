@@ -798,9 +798,15 @@ end
 local gateEnvelopeCache = {}
 
 local function getCachedGateEnvelope(take, item, gateThreshold, gateHoldTime, gateReduction, gateOnsetTime)
-  -- Create a cache key from the parameters
-  local cacheKey = string.format("gate_%.1f_%.2f_%.1f_%.3f_%s", 
-    gateThreshold, gateHoldTime, gateReduction, gateOnsetTime, tostring(take))
+  if not take or not item then return nil end
+  
+  -- Get audio accessor bounds - these change when item is trimmed
+  local aa, aaStart, aaEnd, _, _ = get_accessor_bounds(take)
+  if not aa then return nil end
+  
+  -- Create a cache key that includes aaStart and aaEnd so cache invalidates on trim
+  local cacheKey = string.format("gate_%.1f_%.2f_%.1f_%.3f_%s_%.9f_%.9f", 
+    gateThreshold, gateHoldTime, gateReduction, gateOnsetTime, tostring(take), aaStart, aaEnd)
   
   -- Return cached version if it exists
   if gateEnvelopeCache[cacheKey] then
@@ -814,7 +820,6 @@ local function getCachedGateEnvelope(take, item, gateThreshold, gateHoldTime, ga
   return newEnvelope
 end
 
--- Function to clear cache when needed
 local function clearGateEnvelopeCache()
   gateEnvelopeCache = {}
 end
