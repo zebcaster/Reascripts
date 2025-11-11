@@ -1,5 +1,6 @@
--- Vocal Phrase Leveler with Waveform Preview - Relative Threshold Detection
--- Uses AudioAccessor start/end (project time) for all reads to perfectly match trimmed/offset items
+-- @description Gain Assist
+-- @author ChimRichalds
+-- @version 1.0
 
 local reaper = reaper
 
@@ -9,7 +10,7 @@ if not math.log10 then
 end
 
 -- DEFAULT CONFIG
-local SCRIPT_NAME = "Vocal Phrase Leveler with Preview"
+local SCRIPT_NAME = "Gain Assist"
 local DEFAULT_PEAK_CEILING = 0
 local DEFAULT_CORRECTION_STRENGTH = 0
 local DEFAULT_SEPARATION_SENSITIVITY = 0.00
@@ -18,7 +19,7 @@ local DEFAULT_PRE_LIMIT_BOOST = 0
 local DEFAULT_NUM_BARS = 10000
 local DEFAULT_MIN_DB = -150
 local DEFAULT_MAX_DB = -11
-local DEFAULT_CURVE_POWER = 16.0
+local DEFAULT_CURVE_POWER = 14.0
 local DEFAULT_RESOLUTION_MS = 10
 local DEFAULT_REDUCE_POINTS = true
 local DEFAULT_RAW_WAVEFORM_OPACITY = 30
@@ -897,7 +898,7 @@ local function applyToItem(item, phrases, adjustments, peakCeiling, trim, preLim
 end
 
 -- ===== GUI State =====
-local ctx = reaper.ImGui_CreateContext('Vocal Phrase Leveler')
+local ctx = reaper.ImGui_CreateContext('Gain Assist')
 
 local sliderDoubleClickTimes = {}
 local sliderLastValue = {}
@@ -995,14 +996,21 @@ local function createMarkerAtTime(clickTime)
 end
 
 local function refreshWaveformDisplay()
+  local t0 = reaper.time_precise()
+  
   local item = reaper.GetSelectedMediaItem(0, 0)
   if not item or not phrases then return end
+  
+  local take = reaper.GetActiveTake(item)
+  if take then
+    releaseAudioAccessor(take)
+  end
+  
   adjustments = calculateVolumeAdjustments(phrases, correctionStrength / 100, preLimitBoost)
   waveformData = getAdjustedWaveform(item, numBars, phrases, adjustments, peakCeiling, trim, preLimitBoost)
   rawWaveformData = getRawWaveform(item, numBars)
-  -- Generate gate points for visualization
+  
   if gateEnabled then
-    local take = reaper.GetActiveTake(item)
     if take then
       gatePoints = getCachedGateEnvelope(take, item, gateThreshold, gateHoldTime, gateReduction, gateOnsetTime)
     end
@@ -1012,6 +1020,9 @@ local function refreshWaveformDisplay()
   
   waveformNeedsRedraw = true
   cacheValid = false
+  
+  local elapsed = reaper.time_precise() - t0
+  debugMsg(string.format("refreshWaveformDisplay: %.3fs\n", elapsed))
 end
 
 local function refreshWaveform(forceRedetect)
@@ -1161,7 +1172,7 @@ local function handleHotkeys()
         end
       end
     end
-    reaper.Undo_EndBlock("Vocal Phrase Leveler", -1)
+    reaper.Undo_EndBlock("Gain Assist", -1)
     reaper.UpdateArrange()
     statusMessage = string.format("Committed to %d item(s) | Apply: %.3fs", processed, totalApply)
   end
@@ -1204,7 +1215,7 @@ local ctxInit = false
 local function loop()
   PushTheme()
   if not ctxInit then refreshWaveform(true); ctxInit = true end
-  local visible, open = reaper.ImGui_Begin(ctx, 'Vocal Phrase Leveler', true, reaper.ImGui_WindowFlags_None())
+  local visible, open = reaper.ImGui_Begin(ctx, 'Gain Assist', true, reaper.ImGui_WindowFlags_None())
   if visible then
     
     if reaper.ImGui_IsKeyPressed(ctx, reaper.ImGui_Key_Escape()) then open = false end
@@ -1238,9 +1249,9 @@ local function loop()
       reaper.ImGui_Text(ctx, msg)
     else
       if showHelpMenu then
-        local helpVisible, helpOpen = reaper.ImGui_Begin(ctx, 'Help - Vocal Phrase Leveler', true)
+        local helpVisible, helpOpen = reaper.ImGui_Begin(ctx, 'Help - Gain Assist', true)
         if helpVisible then
-          reaper.ImGui_Text(ctx, "VOCAL PHRASE LEVELER - HELP")
+          reaper.ImGui_Text(ctx, "GAIN ASSIST - HELP")
           reaper.ImGui_Separator(ctx)
           local changed, newVal = reaper.ImGui_Checkbox(ctx, "Show Tooltips##helpMenu", showTooltips)
           if changed then
@@ -1251,7 +1262,7 @@ local function loop()
           reaper.ImGui_Separator(ctx)
           reaper.ImGui_Spacing(ctx)
           
-          reaper.ImGui_TextWrapped(ctx, "This tool detects vocal phrases and balances their volume levels.")
+          reaper.ImGui_TextWrapped(ctx, "This tool detects audio 'phrases' and balances their volume levels.")
           reaper.ImGui_Spacing(ctx)
           reaper.ImGui_Text(ctx, "PHRASE DETECTION:")
           reaper.ImGui_BulletText(ctx, "Uses relative threshold based on median RMS level")
@@ -1276,7 +1287,7 @@ local function loop()
           reaper.ImGui_BulletText(ctx, "Phrase Balancing: 0-100% (normalizes phrase levels)")
           reaper.ImGui_BulletText(ctx, "Pre-Limit Boost: -12 to +12 dB (before peak limiting)")
           reaper.ImGui_BulletText(ctx, "Peak Ceiling: -60 to 0 dB (hard limit on output)")
-          reaper.ImGui_BulletText(ctx, "Overall Trim: -24 to +24 dB (final output level)")
+          reaper.ImGui_BulletText(ctx, "Overall Trim: -12 to +12 dB (final output level)")
           reaper.ImGui_Spacing(ctx)
           reaper.ImGui_Text(ctx, "NOISE GATE:")
           reaper.ImGui_BulletText(ctx, "Enable gate to reduce low-level noise")
@@ -1289,7 +1300,8 @@ local function loop()
           reaper.ImGui_Text(ctx, "TIPS:")
           reaper.ImGui_BulletText(ctx, "Right-click sliders to reset to defaults")
           reaper.ImGui_BulletText(ctx, "Use 'Refresh' to force re-detection")
-          reaper.ImGui_BulletText(ctx, "Click 'Apply' to commit changes to selected items")
+          reaper.ImGui_BulletText(ctx, "Click 'Apply' or press Enter to commit changes to selected items")
+          reaper.ImGui_BulletText(ctx, "Press Esc to exit script")
           reaper.ImGui_BulletText(ctx, "Reserve area outside edge markers for silence")
           reaper.ImGui_BulletText(ctx, "If envelope fails to apply, try toggling it on first")
           reaper.ImGui_BulletText(ctx, "To reduce lag, decrease waveform resolution")
@@ -1357,7 +1369,7 @@ local function loop()
               end
             end
           end
-          reaper.Undo_EndBlock("Vocal Phrase Leveler", -1)
+          reaper.Undo_EndBlock("Gain Assist", -1)
           reaper.UpdateArrange()
           statusMessage = string.format("Committed to %d item(s) | Apply: %.3fs", processed, totalApply)
         end
@@ -1543,7 +1555,7 @@ local function loop()
                 reaper.ImGui_Text(ctx, "Peak Ceiling (dB)")
                 reaper.ImGui_Spacing(ctx)
                 
-                changed2, newVal2 = reaper.ImGui_SliderDouble(ctx, "##trim", trim, -24, 24, "%.1f")
+                changed2, newVal2 = reaper.ImGui_SliderDouble(ctx, "##trim", trim, -12, 12, "%.1f")
                 if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_IsMouseClicked(ctx, 1) then
                   trim = DEFAULT_TRIM
                   statusMessage = "Overall Trim reset"
