@@ -604,7 +604,7 @@ local function drawPlayhead(drawList, item, x, y, w, h, zoomLevel, zoomCenter, t
   end
 end
 
--- ===== UPDATE drawGateOverlay() function =====
+-- ===== UPDATE drawGateOverlay() function with fade zone visualization =====
 local function drawGateOverlay(drawList, gatePoints, adjustedData, item, x, y, width, height, zoomLevel, zoomCenter, gateOpacity)
   if not gatePoints or #gatePoints == 0 then return end
   if not adjustedData or #adjustedData == 0 then return end
@@ -624,9 +624,16 @@ local function drawGateOverlay(drawList, gatePoints, adjustedData, item, x, y, w
   local centerY = y + height / 2
   local halfH = height / 2
   
-  -- Gate overlay color: red with variable opacity
+  -- Gate overlay colors: red with variable opacity
   local gateOpacityHex = math.floor(gateOpacity * 2.55)
   local gateOverlayColor = 0xFF000000 + gateOpacityHex
+  
+  -- Fade zone opacity is 50% of the main opacity
+  local fadeOpacityHex = math.floor(gateOpacity * 0.5 * 2.55)
+  local fadeOverlayColor = 0xFF000000 + fadeOpacityHex
+  
+  -- We need to track the previous reduction to detect transitions
+  local prevReduction = 1.0
   
   -- Draw gate reduction regions
   for i = startSample, endSample do
@@ -645,8 +652,15 @@ local function drawGateOverlay(drawList, gatePoints, adjustedData, item, x, y, w
       
       -- Only draw overlay where gate is actively reducing (not at full 1.0)
       if reduction < 0.99 then
+        -- Check if this is a fade zone (reduction between 0 and 1, not at the extremes)
+        -- Fade zones are where reduction is strictly between fully reduced and fully open
+        local reductionLin = dBToLinear(-60)  -- Default gate reduction, adjust if needed
+        local isFadeZone = reduction > (reductionLin + 0.01) and reduction < 0.99
+        
+        local colorToUse = isFadeZone and fadeOverlayColor or gateOverlayColor
+        
         -- Draw overlay for the full height at this position
-        reaper.ImGui_DrawList_AddRectFilled(drawList, barX, y, barX + barWidth, y + height, gateOverlayColor)
+        reaper.ImGui_DrawList_AddRectFilled(drawList, barX, y, barX + barWidth, y + height, colorToUse)
       end
     end
   end
