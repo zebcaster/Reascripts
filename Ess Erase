@@ -1,0 +1,989 @@
+-- @description De-Esser
+-- @author ChimRichalds
+-- @version 1.0
+
+local reaper = reaper
+
+-- Math compatibility
+if not math.log10 then
+  math.log10 = function(x) return math.log(x) / math.log(10) end
+end
+
+-- DEFAULT CONFIG
+local SCRIPT_NAME = "De-Esser"
+local DEFAULT_FREQ_LOW = 4000
+local DEFAULT_FREQ_HIGH = 14000
+local DEFAULT_THRESHOLD = -20
+local DEFAULT_REDUCTION = -12
+local DEFAULT_ATTACK_TIME = 0.01
+local DEFAULT_RELEASE_TIME = 0.1
+local DEFAULT_NUM_BARS = 10000
+local DEFAULT_MIN_DB = -150
+local DEFAULT_MAX_DB = -11
+local DEFAULT_CURVE_POWER = 14.0
+local DEFAULT_DETECTION_MS = 10
+local DEFAULT_ENVELOPE_MS = 1
+local DEFAULT_SIBILANCE_OPACITY = 60
+
+-- Debug toggle
+local showDebug = false
+local function debugMsg(msg) if showDebug then reaper.ShowConsoleMsg(msg) end end
+
+-- Persistent State
+local function getExtState(key, default)
+  local state = reaper.GetExtState(SCRIPT_NAME, key)
+  if state == "" then return default end
+  local num = tonumber(state)
+  if num ~= nil then return num end
+  return state
+end
+
+local function setExtState(key, value)
+  reaper.SetExtState(SCRIPT_NAME, key, tostring(value), true)
+end
+
+-- Load/Save Settings
+local function loadSettings()
+  local freqLow = getExtState("freqLow", DEFAULT_FREQ_LOW)
+  local freqHigh = getExtState("freqHigh", DEFAULT_FREQ_HIGH)
+  local threshold = getExtState("threshold", DEFAULT_THRESHOLD)
+  local reduction = getExtState("reduction", DEFAULT_REDUCTION)
+  local attackTime = getExtState("attackTime", DEFAULT_ATTACK_TIME)
+  local releaseTime = getExtState("releaseTime", DEFAULT_RELEASE_TIME)
+  local numBars = getExtState("numBars", DEFAULT_NUM_BARS)
+  local minDB = getExtState("minDB", DEFAULT_MIN_DB)
+  local maxDB = getExtState("maxDB", DEFAULT_MAX_DB)
+  local curvePower = getExtState("curvePower", DEFAULT_CURVE_POWER)
+  local detectionMs = getExtState("detectionMs", DEFAULT_DETECTION_MS)
+  local envelopeMs = getExtState("envelopeMs", DEFAULT_ENVELOPE_MS)
+  local sibilanceOpacity = getExtState("sibilanceOpacity", DEFAULT_SIBILANCE_OPACITY)
+  local showTooltips = getExtState("showTooltips", 1) == 1
+  
+  return freqLow, freqHigh, threshold, reduction, attackTime, releaseTime, numBars, minDB, maxDB, curvePower, detectionMs, envelopeMs, sibilanceOpacity, showTooltips
+end
+
+local function saveSettings(freqLow, freqHigh, threshold, reduction, attackTime, releaseTime, detectionMs, envelopeMs, sibilanceOpacity, showTooltips)
+  setExtState("freqLow", freqLow)
+  setExtState("freqHigh", freqHigh)
+  setExtState("threshold", threshold)
+  setExtState("reduction", reduction)
+  setExtState("attackTime", attackTime)
+  setExtState("releaseTime", releaseTime)
+  setExtState("detectionMs", detectionMs)
+  setExtState("envelopeMs", envelopeMs)
+  setExtState("sibilanceOpacity", sibilanceOpacity)
+  setExtState("showTooltips", showTooltips and 1 or 0)
+end
+
+-- Conversion
+local function dBToLinear(dB)
+  if not dB or dB ~= dB then return 1.0 end
+  return 10^(dB/20)
+end
+
+local function linearTodB(linear)
+  if not linear or linear ~= linear then return -150 end
+  if linear <= 0.00001 then return -150 end
+  return 20 * math.log10(linear)
+end
+
+-- Helper function to detect channel count from source
+local function getSourceChannelCount(take)
+  local src = reaper.GetMediaItemTake_Source(take)
+  if not src then return 1 end
+  local numChannels = reaper.GetMediaSourceNumChannels(src)
+  return math.max(1, numChannels)
+end
+
+-- ===== Audio accessor mgmt =====
+local audioAccessors, audioBuffers = {}, {}
+
+local function getAudioAccessor(take)
+  if not take then return nil end
+  if audioAccessors[take] then return audioAccessors[take] end
+  local aa = reaper.CreateTakeAudioAccessor(take)
+  audioAccessors[take] = aa
+  return aa
+end
+
+local function releaseAudioAccessor(take)
+  if audioAccessors[take] then reaper.DestroyAudioAccessor(audioAccessors[take]); audioAccessors[take] = nil end
+  if audioBuffers[take] then audioBuffers[take] = nil end
+end
+
+local function getAudioBuffer(take, size)
+  if not audioBuffers[take] or #audioBuffers[take] < size then audioBuffers[take] = reaper.new_array(size) end
+  return audioBuffers[take]
+end
+
+-- Helper: unified accessor bounds (PROJECT TIME)
+local function get_accessor_bounds(take)
+  if not take then return nil end
+  local aa = getAudioAccessor(take)
+  if not aa then return nil end
+  local aaStart = reaper.GetAudioAccessorStartTime(aa)
+  local aaEnd   = reaper.GetAudioAccessorEndTime(aa)
+  local src     = reaper.GetMediaItemTake_Source(take)
+  local sr      = reaper.GetMediaSourceSampleRate(src)
+  local itemLen = math.max(0, aaEnd - aaStart)
+  return aa, aaStart, aaEnd, sr, itemLen
+end
+
+-- ===== Real FFT-based sibilance detection =====
+local function detectSibilance(take, item, freqLow, freqHigh, threshold, detectionMs)
+  local aa, aaStart, aaEnd, samplerate, itemLen = get_accessor_bounds(take)
+  if not aa or samplerate <= 0 or itemLen <= 0 then return nil end
+
+  local itemVolume = reaper.GetMediaItemInfo_Value(item, "D_VOL")
+  local numChannels = getSourceChannelCount(take)
+  
+  local windowSize = math.max(0.01, (detectionMs or 10) / 1000)
+  local numWindows = math.ceil(itemLen / windowSize)
+  
+  local hopSize = math.floor(samplerate * windowSize)
+  local fftSize = 2048  -- Power of 2 for FFT
+  local sibilanceMap = {}
+  
+  -- Scan through audio
+  for i = 0, numWindows - 1 do
+    local readTime = aaStart + (i * windowSize)
+    local numSamples = math.min(hopSize, 100000)
+    
+    if numSamples > 0 then
+      local buf = getAudioBuffer(take, numSamples * numChannels * 2)
+      buf.clear()
+      local read = reaper.GetAudioAccessorSamples(aa, samplerate, numChannels, readTime, numSamples, buf)
+      
+      if read > 0 then
+        local t = buf.table()
+        
+        -- Create FFT buffer (real FFT needs fftSize samples)
+        local fftData = reaper.new_array(fftSize)
+        fftData.clear()
+        
+        -- Copy audio into FFT buffer (interleaved stereo -> mono, convert to real samples)
+        local fillIdx = 1
+        for j = 1, math.min(numSamples, fftSize) do
+          local sample = t[(j - 1) * numChannels + 1] * itemVolume
+          fftData[j] = sample
+          fillIdx = j + 1
+        end
+        
+        -- Perform real FFT
+        fftData.fft_real(fftSize, true, 1)
+        
+        -- Calculate frequency resolution
+        local freqRes = samplerate / fftSize
+        local binLow = math.floor(freqLow / freqRes) + 1
+        local binHigh = math.floor(freqHigh / freqRes) + 1
+        binLow = math.max(1, math.min(binLow, fftSize / 2))
+        binHigh = math.max(binLow, math.min(binHigh, fftSize / 2))
+        
+        -- Analyze sibilance band (real FFT output: pairs of (real, imag))
+        local energy = 0
+        for bin = binLow, binHigh do
+          local realIdx = bin * 2 - 1
+          local imagIdx = bin * 2
+          if realIdx <= fftSize and imagIdx <= fftSize then
+            local real = fftData[realIdx]
+            local imag = fftData[imagIdx]
+            energy = energy + (real * real + imag * imag)
+          end
+        end
+        
+        -- Normalize energy
+        local binCount = math.max(1, binHigh - binLow + 1)
+        energy = math.sqrt(energy / binCount) / fftSize
+        local energyDB = linearTodB(energy)
+        
+        local isSibilant = (energyDB > threshold)
+        sibilanceMap[i + 1] = {energy=energy, isSibilant=isSibilant, energyDB=energyDB}
+      else
+        sibilanceMap[i + 1] = {energy=0, isSibilant=false, energyDB=-150}
+      end
+    end
+  end
+  
+  releaseAudioAccessor(take)
+  return sibilanceMap, itemLen, windowSize
+end
+
+-- ===== Waveform with sibilance coloring =====
+local function getWaveformWithSibilance(item, numSamples, sibilanceMap, detectionWindowSize, reduction)
+  local take = reaper.GetActiveTake(item)
+  if not take or reaper.TakeIsMIDI(take) then return nil, nil end
+  local itemVolume = reaper.GetMediaItemInfo_Value(item, "D_VOL")
+
+  local aa, aaStart, aaEnd, samplerate, itemLen = get_accessor_bounds(take)
+  if not aa or samplerate <= 0 or itemLen <= 0 then if take then releaseAudioAccessor(take) end; return nil, nil end
+
+  local numChannels = getSourceChannelCount(take)
+  local data = {}
+  local waveformWindowSize = itemLen / numSamples
+  local reductionLin = dBToLinear(reduction)
+
+  for i = 0, numSamples - 1 do
+    local readTime = aaStart + (i * waveformWindowSize)
+    local numSamps = math.min(math.floor(samplerate * waveformWindowSize), 1000000)
+    
+    -- Determine which window this sample falls into for sibilance detection
+    local itemTime = (readTime - aaStart)
+    local sibWindow = math.floor(itemTime / detectionWindowSize) + 1
+    local isSibilant = false
+    if sibilanceMap and sibWindow >= 1 and sibWindow <= #sibilanceMap then
+      isSibilant = sibilanceMap[sibWindow].isSibilant
+    end
+    
+    if numSamps <= 0 then
+      data[i+1] = {pos=0, neg=0, isSibilant=isSibilant}
+    else
+      local buf = getAudioBuffer(take, numSamps * numChannels * 2)
+      buf.clear()
+      local read = reaper.GetAudioAccessorSamples(aa, samplerate, numChannels, readTime, numSamps, buf)
+      if read > 0 then
+        local pos, neg, t = 0, 0, buf.table()
+        for j = 1, #t, numChannels * 2 do
+          local s = t[j] * itemVolume
+          -- Apply reduction if sibilant
+          if isSibilant then
+            s = s * reductionLin
+          end
+          if s > pos then pos = s end
+          if s < neg then neg = s end
+        end
+        data[i+1] = {pos=pos, neg=math.abs(neg), isSibilant=isSibilant}
+      else
+        data[i+1] = {pos=0, neg=0, isSibilant=isSibilant}
+      end
+    end
+  end
+
+  releaseAudioAccessor(take)
+  return data, linearTodB(itemVolume)
+end
+
+-- ===== Waveform data (raw) =====
+local function getRawWaveform(item, numSamples)
+  local take = reaper.GetActiveTake(item)
+  if not take or reaper.TakeIsMIDI(take) then return nil, 0 end
+  local itemVolume = reaper.GetMediaItemInfo_Value(item, "D_VOL")
+
+  local aa, aaStart, aaEnd, samplerate, itemLen = get_accessor_bounds(take)
+  if not aa or samplerate <= 0 or itemLen <= 0 then if take then releaseAudioAccessor(take) end; return nil, 0 end
+
+  local numChannels = getSourceChannelCount(take)
+  local data = {}
+  local windowSize = itemLen / numSamples
+
+  for i = 0, numSamples - 1 do
+    local readTime = aaStart + (i * windowSize)
+    local numSamps = math.min(math.floor(samplerate * windowSize), 1000000)
+    if numSamps <= 0 then
+      data[i+1] = {pos=0, neg=0}
+    else
+      local buf = getAudioBuffer(take, numSamps * numChannels * 2)
+      buf.clear()
+      local read = reaper.GetAudioAccessorSamples(aa, samplerate, numChannels, readTime, numSamps, buf)
+      if read > 0 then
+        local pos, neg, t = 0, 0, buf.table()
+        for j = 1, #t, numChannels * 2 do
+          local s = t[j] * itemVolume
+          if s > pos then pos = s end
+          if s < neg then neg = s end
+        end
+        data[i+1] = {pos=pos, neg=math.abs(neg)}
+      else
+        data[i+1] = {pos=0, neg=0}
+      end
+    end
+  end
+
+  releaseAudioAccessor(take)
+  return data, linearTodB(itemVolume)
+end
+
+-- ===== Drawing helpers =====
+local function drawWaveform(drawList, rawData, processedData, x, y, width, height, minDB, maxDB, curvePower, zoomLevel, zoomCenter, sibilanceOpacity, rawOpacity)
+  if not processedData or #processedData == 0 then return end
+  local centerY = y + height / 2
+  local dbRange = maxDB - minDB
+
+  local totalSamples = #processedData
+  local visibleSamples = math.max(50, math.floor(totalSamples / zoomLevel))
+  local startSample = math.max(1, math.min(totalSamples - visibleSamples, math.floor(zoomCenter * totalSamples - visibleSamples / 2)))
+  local endSample = math.min(totalSamples, startSample + visibleSamples)
+  local barWidth = width / visibleSamples
+
+  reaper.ImGui_DrawList_AddLine(drawList, x, centerY, x + width, centerY, 0x808080FF, 1)
+
+  local function dbToHeight(db, maxHeight)
+    if db <= minDB then return 0 end
+    if db >= maxDB then return maxHeight end
+    local normalized = (db - minDB) / dbRange
+    local curved = normalized ^ curvePower
+    return curved * maxHeight
+  end
+
+  -- Draw raw waveform in background at low opacity
+  local rawOpacityHex = math.floor(rawOpacity * 2.55)
+  local rawColor = 0x40808000 + rawOpacityHex
+
+  if rawData and #rawData > 0 and rawOpacity > 0 then
+    for i = startSample, endSample do
+      if i <= #rawData then
+        local barX = x + (i - startSample) * barWidth
+        local posDB = linearTodB(rawData[i].pos)
+        local negDB = linearTodB(rawData[i].neg)
+        local posH = dbToHeight(posDB, height / 2)
+        local negH = dbToHeight(negDB, height / 2)
+        if posH > 0 then reaper.ImGui_DrawList_AddRectFilled(drawList, barX, centerY - posH, barX + barWidth + 1, centerY, rawColor) end
+        if negH > 0 then reaper.ImGui_DrawList_AddRectFilled(drawList, barX, centerY, barX + barWidth + 1, centerY + negH, rawColor) end
+      end
+    end
+  end
+
+  -- Draw processed waveform on top
+  for i = startSample, endSample do
+    if i <= #processedData then
+      local barX = x + (i - startSample) * barWidth
+      local posDB = linearTodB(processedData[i].pos)
+      local negDB = linearTodB(processedData[i].neg)
+      local posH = dbToHeight(posDB, height / 2)
+      local negH = dbToHeight(negDB, height / 2)
+      
+      -- Choose color based on sibilance
+      local waveColor = 0x4080FFFF  -- Normal blue
+      if processedData[i].isSibilant then
+        -- Sibilant: orange with opacity control
+        local sibOpacityHex = math.floor(sibilanceOpacity * 2.55)
+        waveColor = 0xFFA500FF - ((255 - sibOpacityHex) * 256)
+      end
+      
+      if posH > 0 then reaper.ImGui_DrawList_AddRectFilled(drawList, barX, centerY - posH, barX + barWidth + 1, centerY, waveColor) end
+      if negH > 0 then reaper.ImGui_DrawList_AddRectFilled(drawList, barX, centerY, barX + barWidth + 1, centerY + negH, waveColor) end
+    end
+  end
+
+  local dbMarks = {0, -6, -12, -18, -24, -30, -40, -60, -80, -100, -120}
+  for _, db in ipairs(dbMarks) do
+    if db >= minDB and db <= maxDB then
+      local yTop = centerY - dbToHeight(db, height / 2)
+      local yBot = centerY + dbToHeight(db, height / 2)
+      reaper.ImGui_DrawList_AddLine(drawList, x - 5, yTop, x, yTop, 0xFFFFFF80, 1)
+      reaper.ImGui_DrawList_AddLine(drawList, x - 5, yBot, x, yBot, 0xFFFFFF80, 1)
+    end
+  end
+
+  if zoomLevel > 1.01 then
+    reaper.ImGui_DrawList_AddText(drawList, x + 5, y + 5, 0xFFFFFFFF, string.format("Zoom: %.1fx", zoomLevel))
+  end
+end
+
+-- Time ruler drawing
+local function drawTimeRuler(drawList, item, x, y, width, height, zoomLevel, zoomCenter, totalSamples, startSample, visibleSamples)
+  if not item then return end
+  reaper.ImGui_DrawList_AddRectFilled(drawList, x, y, x + width, y + height, 0x0F0F0FF0)
+
+  local take = reaper.GetActiveTake(item)
+  if not take then return end
+
+  local aa, aaStart, aaEnd, _, itemLen = get_accessor_bounds(take)
+  if not aa then return end
+
+  local itemPos = reaper.GetMediaItemInfo_Value(item, "D_POSITION")
+  local startTime = itemPos + (startSample / totalSamples) * itemLen
+  local endTime   = itemPos + ((startSample + visibleSamples) / totalSamples) * itemLen
+  local timeRange = endTime - startTime
+
+  local divisions = {1, 2, 5, 10, 30, 60, 120, 300, 600}
+  local targetDivisions = math.max(3, math.min(10, width / 80))
+  local bestDivision = divisions[1]
+  for _, div in ipairs(divisions) do
+    if timeRange / div <= targetDivisions then bestDivision = div; break end
+  end
+
+  local firstMark = math.ceil(startTime / bestDivision) * bestDivision
+  for markTime = firstMark, endTime, bestDivision do
+    if markTime >= startTime and markTime <= endTime then
+      local relX = (markTime - startTime) / timeRange
+      local px = x + relX * width
+      reaper.ImGui_DrawList_AddLine(drawList, px, y, px, y + height * 0.3, 0xFFFFFFFF, 1)
+      local hours = math.floor(markTime / 3600)
+      local minutes = math.floor((markTime % 3600) / 60)
+      local seconds = markTime % 60
+      local timeText
+      if hours > 0 then
+        timeText = string.format("%d:%02d:%05.2f", hours, minutes, seconds)
+      elseif minutes > 0 then
+        timeText = string.format("%d:%05.2f", minutes, seconds)
+      else
+        timeText = string.format("%.2f", seconds)
+      end
+      local textWidth = #timeText * 7
+      reaper.ImGui_DrawList_AddText(drawList, px - textWidth/2, y + height * 0.4, 0xFFFFFFFF, timeText)
+    end
+  end
+end
+
+-- Playhead drawing
+local function drawPlayhead(drawList, item, x, y, w, h, zoomLevel, zoomCenter, totalSamples, startSample, visibleSamples)
+  if not item then return end
+  
+  local isPlaying = reaper.GetPlayState() & 1 == 1
+  local cursorPos = isPlaying and reaper.GetPlayPosition() or reaper.GetCursorPosition()
+  local itemStart = reaper.GetMediaItemInfo_Value(item, "D_POSITION")
+  local itemLength = reaper.GetMediaItemInfo_Value(item, "D_LENGTH")
+  local itemEnd = itemStart + itemLength
+  
+  -- Check if cursor is within this item
+  if cursorPos >= itemStart and cursorPos <= itemEnd then
+    -- Get the take to access audio bounds
+    local take = reaper.GetActiveTake(item)
+    if not take then return end
+    
+    local aa, aaStart, aaEnd, _, audioItemLen = get_accessor_bounds(take)
+    if not aa then return end
+    
+    -- Calculate offset within the item (in item time, not project time)
+    local itemOffset = cursorPos - itemStart
+    
+    -- Map item time to waveform sample position
+    local samplePos = math.floor((itemOffset / audioItemLen) * totalSamples) + 1
+    
+    -- Check if sample position is visible in current zoom/pan
+    if samplePos >= startSample and samplePos <= startSample + visibleSamples then
+      -- Calculate pixel X position on waveform
+      local xPos = x + ((samplePos - startSample) / visibleSamples) * w
+      
+      -- Draw playhead line (bright green, semi-thick)
+      reaper.ImGui_DrawList_AddLine(drawList, xPos, y, xPos, y + h, 0x00FF00FF, 2)
+      
+      -- Optional: Add a subtle glow/highlight effect
+      reaper.ImGui_DrawList_AddLine(drawList, xPos, y, xPos, y + h, 0x00FF0044, 4)
+    end
+  end
+end
+
+-- Envelope simplification
+local function simplifyEnvelope(env)
+  local pointCount = reaper.CountEnvelopePoints(env)
+  if pointCount <= 2 then return end
+  local pts = {}
+  for i = 0, pointCount - 1 do
+    local _, time, value, shape, tension, selected = reaper.GetEnvelopePoint(env, i)
+    pts[#pts+1] = {time=time, value=value, shape=shape, tension=tension, selected=selected}
+  end
+  table.sort(pts, function(a,b) return a.time < b.time end)
+  local keep = {}
+  keep[#keep+1] = pts[1]
+  local i = 2
+  while i <= #pts do
+    local s = i
+    local v = pts[i].value
+    while i <= #pts and math.abs(pts[i].value - v) < 0.0001 do i = i + 1 end
+    local e = i - 1
+    if e - s >= 2 then
+      keep[#keep+1] = pts[s]; keep[#keep+1] = pts[e]
+    else
+      for j = s, e do keep[#keep+1] = pts[j] end
+    end
+  end
+  local itemLen = reaper.GetEnvelopeInfo_Value(env, "LENGTH")
+  reaper.DeleteEnvelopePointRange(env, -1, itemLen + 1000)
+  for _, p in ipairs(keep) do reaper.InsertEnvelopePoint(env, p.time, p.value, p.shape, p.tension, p.selected, true) end
+  reaper.Envelope_SortPoints(env)
+end
+
+-- Apply de-esser to item
+local function applyToItem(item, sibilanceMap, detectionWindowSize, reduction, envelopeMs)
+  local ts = reaper.time_precise()
+  local take = reaper.GetActiveTake(item)
+  if not take or reaper.TakeIsMIDI(take) then return false, 0 end
+  
+  local env = reaper.GetTakeEnvelopeByName(take, "Volume")
+  if not env then
+    reaper.Main_OnCommand(reaper.NamedCommandLookup("_S&M_TAKEENVSHOW9"), 0)
+    env = reaper.GetTakeEnvelopeByName(take, "Volume")
+  end
+  if not env then return false, 0 end
+
+  local aa, aaStart, aaEnd, samplerate, itemLen = get_accessor_bounds(take)
+  if not aa or samplerate <= 0 or itemLen <= 0 then if take then releaseAudioAccessor(take) end; return false, 0 end
+
+  reaper.DeleteEnvelopePointRange(env, -1, itemLen + 1000)
+
+  local envelopeResolutionSec = math.max(0.0001, (envelopeMs or 1) / 1000)
+  local reductionLin = dBToLinear(reduction)
+  
+  local numPoints = math.ceil(itemLen / envelopeResolutionSec)
+
+  for i = 0, numPoints do
+    local tRel = math.min(i * envelopeResolutionSec, itemLen)
+    
+    -- Determine reduction at this time point
+    local sibWindow = math.floor(tRel / detectionWindowSize) + 1
+    local isSibilant = false
+    if sibilanceMap and sibWindow >= 1 and sibWindow <= #sibilanceMap then
+      isSibilant = sibilanceMap[sibWindow].isSibilant
+    end
+    
+    local reduction_value = isSibilant and reductionLin or 1.0
+    local scaled = reaper.ScaleToEnvelopeMode(1, reduction_value, env)
+    reaper.InsertEnvelopePoint(env, tRel, scaled, 0, 0, false, true)
+  end
+
+  releaseAudioAccessor(take)
+  reaper.Envelope_SortPoints(env)
+  simplifyEnvelope(env)
+  return true, (reaper.time_precise() - ts)
+end
+
+-- ===== GUI State =====
+local ctx = reaper.ImGui_CreateContext('De-Esser')
+
+local freqLow, freqHigh, threshold, reduction, attackTime, releaseTime, numBars, minDB, maxDB, curvePower, detectionMs, envelopeMs, sibilanceOpacity, showTooltips = loadSettings()
+
+local statusMessage = "Ready"
+local waveformData = nil
+local rawWaveformData = nil
+local sibilanceMap = nil
+local detectionWindowSize = 0.01
+local itemName = ""
+local lastAnalysisTime = 0
+
+local waveformNeedsRedraw = true
+local zoomLevel, zoomCenter = 1.0, 0.5
+local lastZoomLevel, lastZoomCenter = 1.0, 0.5
+local lastPlotW, lastPlotH = 0, 0
+local isDragging, dragStartY, dragStartZoom, dragStartCursorSample = false, 0, 1.0, 0
+
+local sliderWasActive = {}
+local DEFAULT_RAW_WAVEFORM_OPACITY = 30
+local rawWaveformOpacity = DEFAULT_RAW_WAVEFORM_OPACITY
+
+local function getPinnedWaveformRect(plotHeight)
+  local winPosX, winPosY = reaper.ImGui_GetWindowPos(ctx)
+  local winW, winH      = reaper.ImGui_GetWindowSize(ctx)
+  local padX, padY = 8, 8
+  local okMin, crMinX, crMinY = pcall(reaper.ImGui_GetWindowContentRegionMin, ctx)
+  local okMax, crMaxX, crMaxY = pcall(reaper.ImGui_GetWindowContentRegionMax, ctx)
+  if okMin and okMax and crMinX and crMaxX then
+    local x = winPosX + crMinX
+    local y = winPosY + crMinY
+    local width = crMaxX - crMinX
+    local height = plotHeight
+    return x, y, width, height
+  end
+  local x = winPosX + padX
+  local y = winPosY + padY
+  local width  = math.max(0, winW - padX * 2)
+  local height = plotHeight
+  return x, y, width, height
+end
+
+local function refreshWaveform()
+  local t0 = reaper.time_precise()
+  local item = reaper.GetSelectedMediaItem(0, 0)
+  if not item then statusMessage = "No item selected"; waveformData = nil; rawWaveformData = nil; return end
+  
+  local take = reaper.GetActiveTake(item)
+  if not take or reaper.TakeIsMIDI(take) then statusMessage = "MIDI take selected"; waveformData = nil; rawWaveformData = nil; return end
+  
+  if take then itemName = reaper.GetTakeName(take) end
+
+  detectionWindowSize = math.max(0.01, (detectionMs or 10) / 1000)
+  sibilanceMap, _ , _ = detectSibilance(take, item, freqLow, freqHigh, threshold, detectionMs)
+
+  rawWaveformData = getRawWaveform(item, numBars)
+  waveformData = getWaveformWithSibilance(item, numBars, sibilanceMap, detectionWindowSize, reduction)
+  
+  lastAnalysisTime = reaper.time_precise() - t0
+  statusMessage = string.format("Analysis: %.3fs", lastAnalysisTime)
+  
+  waveformNeedsRedraw = true
+end
+
+local function handleHotkeys()
+  if reaper.ImGui_IsKeyPressed(ctx, reaper.ImGui_Key_Enter()) then
+    saveSettings(freqLow, freqHigh, threshold, reduction, attackTime, releaseTime, detectionMs, envelopeMs, sibilanceOpacity, showTooltips)
+    reaper.Undo_BeginBlock()
+    local cnt, processed, totalApply = reaper.CountSelectedMediaItems(0), 0, 0
+    
+    for i = 0, cnt - 1 do
+      local item = reaper.GetSelectedMediaItem(0, i)
+      local take = reaper.GetActiveTake(item)
+      if take and not reaper.TakeIsMIDI(take) then
+        local sibMap, _ , detWinSize = detectSibilance(take, item, freqLow, freqHigh, threshold, detectionMs)
+        if sibMap then
+          local ok, t = applyToItem(item, sibMap, detWinSize, reduction, envelopeMs)
+          if ok then processed = processed + 1; totalApply = totalApply + t end
+        end
+      end
+    end
+    reaper.Undo_EndBlock("De-Esser", -1)
+    reaper.UpdateArrange()
+    statusMessage = string.format("Applied to %d item(s) | Apply: %.3fs", processed, totalApply)
+  end
+  
+  -- Spacebar: Play/Pause
+  if reaper.ImGui_IsKeyPressed(ctx, reaper.ImGui_Key_Space()) then
+    if not reaper.ImGui_IsAnyItemActive(ctx) then
+      local isPlaying = (reaper.GetPlayState() & 1) == 1
+      if isPlaying then
+        reaper.Main_OnCommand(reaper.NamedCommandLookup("_NF_PLAY_STOP_PLAY_PAUSE"), 0)
+      else
+        reaper.Main_OnCommand(reaper.NamedCommandLookup("_NF_PLAY_STOP_PLAY_PAUSE"), 0)
+      end
+    end
+  end
+  
+  if reaper.ImGui_IsKeyPressed(ctx, reaper.ImGui_Key_Escape()) then
+    return false
+  end
+  return true
+end
+
+function PushTheme()
+  reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_WindowPadding(), 20, 8)
+  reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_FrameRounding(), 12)
+  reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_GrabMinSize(), 15)
+  reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_GrabRounding(), 12)
+  reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_WindowBg(), 0x222222F0)
+  reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_FrameBg(), 0x0000008A)
+  reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_FrameBgHovered(), 0x54555666)
+  reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_FrameBgActive(), 0x4296FA66)
+  reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_SliderGrab(), 0x4080FFFF)
+  reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_SliderGrabActive(), 0xFFFFFFFF)
+  reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_ButtonActive(), 0x4080FFFF)
+end
+
+function PopTheme()
+  reaper.ImGui_PopStyleVar(ctx, 4)
+  reaper.ImGui_PopStyleColor(ctx, 7)
+end
+
+local ctxInit = false
+local function loop()
+  PushTheme()
+  if not ctxInit then
+    refreshWaveform()
+    ctxInit = true
+    -- Set initial window size for first-time users
+    reaper.ImGui_SetNextWindowSize(ctx, 900, 700, reaper.ImGui_Cond_FirstUseEver())
+  end
+  
+  local visible, open = reaper.ImGui_Begin(ctx, 'De-Esser', true, reaper.ImGui_WindowFlags_None())
+  if visible then
+    if not handleHotkeys() then open = false end
+    
+    local winW, winH = reaper.ImGui_GetWindowSize(ctx)
+    
+    local contentAvailW, _ = reaper.ImGui_GetContentRegionAvail(ctx)
+    local plotW = math.max(contentAvailW, 100)
+    local plotH = math.max(contentAvailW * 0.15, 150)
+    local rulerH = 25
+
+    if winH < 350 then
+      local availW, availH = reaper.ImGui_GetContentRegionAvail(ctx)
+      local msg = "Window too small - please increase height"
+      local textW = reaper.ImGui_CalcTextSize(ctx, msg)
+      reaper.ImGui_Dummy(ctx, (availW - textW) / 2, availH / 2 - 10)
+      reaper.ImGui_SameLine(ctx)
+      reaper.ImGui_Text(ctx, msg)
+    else
+
+      reaper.ImGui_Dummy(ctx, plotW, plotH + rulerH)
+      reaper.ImGui_Spacing(ctx); reaper.ImGui_Separator(ctx); reaper.ImGui_Spacing(ctx)
+
+      reaper.ImGui_Text(ctx, "Item: " .. (itemName or ""))
+      reaper.ImGui_SameLine(ctx)
+      reaper.ImGui_Text(ctx, "Status: " .. (statusMessage or ""))
+      reaper.ImGui_Dummy(ctx, 0, 2)
+      
+      local contentWidth, _ = reaper.ImGui_GetContentRegionAvail(ctx)
+      local totalButtonWidth = 110 + 100 + 100
+      local buttonSpacing = 8
+      totalButtonWidth = totalButtonWidth + (buttonSpacing * 2)
+      
+      if contentWidth >= totalButtonWidth + 20 then
+        reaper.ImGui_SameLine(ctx, contentWidth - totalButtonWidth)
+        
+        if reaper.ImGui_Button(ctx, "Apply", 110, 25) then
+          saveSettings(freqLow, freqHigh, threshold, reduction, attackTime, releaseTime, detectionMs, envelopeMs, sibilanceOpacity, showTooltips)
+          reaper.Undo_BeginBlock()
+          local cnt, processed, totalApply = reaper.CountSelectedMediaItems(0), 0, 0
+          
+          for i = 0, cnt - 1 do
+            local item = reaper.GetSelectedMediaItem(0, i)
+            local take = reaper.GetActiveTake(item)
+            if take and not reaper.TakeIsMIDI(take) then
+              local sibMap, _ , detWinSize = detectSibilance(take, item, freqLow, freqHigh, threshold, detectionMs)
+              if sibMap then
+                local ok, t = applyToItem(item, sibMap, detWinSize, reduction, envelopeMs)
+                if ok then processed = processed + 1; totalApply = totalApply + t end
+              end
+            end
+          end
+          reaper.Undo_EndBlock("De-Esser", -1)
+          reaper.UpdateArrange()
+          statusMessage = string.format("Applied to %d item(s) | Apply: %.3fs", processed, totalApply)
+        end
+        reaper.ImGui_SameLine(ctx, 0, buttonSpacing)
+        
+        if reaper.ImGui_Button(ctx, "Refresh", 100, 25) then
+          refreshWaveform(); zoomLevel, zoomCenter = 1.0, 0.5
+        end
+        reaper.ImGui_SameLine(ctx, 0, buttonSpacing)
+        
+        if reaper.ImGui_Button(ctx, "Reset", 100, 25) then
+          freqLow = DEFAULT_FREQ_LOW
+          freqHigh = DEFAULT_FREQ_HIGH
+          threshold = DEFAULT_THRESHOLD
+          reduction = DEFAULT_REDUCTION
+          detectionMs = DEFAULT_DETECTION_MS
+          envelopeMs = DEFAULT_ENVELOPE_MS
+          sibilanceOpacity = DEFAULT_SIBILANCE_OPACITY
+          statusMessage = "Settings reset to defaults"
+          refreshWaveform()
+        end
+      end
+      
+      reaper.ImGui_Spacing(ctx)
+      
+      local gap = 28
+      local colWidth = math.max(220, math.min(360, (contentWidth - gap) / 2))
+      local totalControlsW = (colWidth * 2) + gap
+      local leftPad = math.max(0, (contentWidth - totalControlsW) / 2)
+
+      if contentWidth < 500 then
+        reaper.ImGui_Text(ctx, "Window too narrow for controls")
+      else
+        reaper.ImGui_Dummy(ctx, leftPad, 0)
+        reaper.ImGui_SameLine(ctx)
+
+        reaper.ImGui_BeginChild(ctx, "controls_left_col", colWidth, 0, reaper.ImGui_WindowFlags_NoScrollbar())
+          reaper.ImGui_PushItemWidth(ctx, colWidth * 0.60)
+
+          local changed, newVal = reaper.ImGui_SliderInt(ctx, "##freqLow", freqLow, 1000, 10000)
+          if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_IsMouseClicked(ctx, 1) then
+            freqLow = DEFAULT_FREQ_LOW
+            statusMessage = "Freq Low reset"
+            refreshWaveform()
+          elseif changed then
+            freqLow = newVal
+            if freqHigh <= freqLow then freqHigh = freqLow + 1000 end
+          end
+          local isActive = reaper.ImGui_IsItemActive(ctx)
+          if sliderWasActive["freqLow"] and not isActive then
+            refreshWaveform()
+          end
+          sliderWasActive["freqLow"] = isActive
+          reaper.ImGui_SameLine(ctx)
+          reaper.ImGui_Text(ctx, "Low Freq (Hz)")
+          reaper.ImGui_Spacing(ctx)
+
+          changed, newVal = reaper.ImGui_SliderInt(ctx, "##freqHigh", freqHigh, 1000, 20000)
+          if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_IsMouseClicked(ctx, 1) then
+            freqHigh = DEFAULT_FREQ_HIGH
+            statusMessage = "Freq High reset"
+            refreshWaveform()
+          elseif changed then
+            freqHigh = newVal
+            if freqLow >= freqHigh then freqLow = freqHigh - 1000 end
+          end
+          isActive = reaper.ImGui_IsItemActive(ctx)
+          if sliderWasActive["freqHigh"] and not isActive then
+            refreshWaveform()
+          end
+          sliderWasActive["freqHigh"] = isActive
+          reaper.ImGui_SameLine(ctx)
+          reaper.ImGui_Text(ctx, "High Freq (Hz)")
+          reaper.ImGui_Spacing(ctx)
+
+          changed, newVal = reaper.ImGui_SliderDouble(ctx, "##threshold", threshold, -80, 0, "%.1f")
+          if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_IsMouseClicked(ctx, 1) then
+            threshold = DEFAULT_THRESHOLD
+            statusMessage = "Threshold reset"
+            refreshWaveform()
+          elseif changed then
+            threshold = newVal
+          end
+          isActive = reaper.ImGui_IsItemActive(ctx)
+          if sliderWasActive["threshold"] and not isActive then
+            refreshWaveform()
+          end
+          sliderWasActive["threshold"] = isActive
+          reaper.ImGui_SameLine(ctx)
+          reaper.ImGui_Text(ctx, "Threshold (dB)")
+
+          reaper.ImGui_PopItemWidth(ctx)
+        reaper.ImGui_EndChild(ctx)
+
+        reaper.ImGui_SameLine(ctx, 0, gap)
+
+        reaper.ImGui_BeginChild(ctx, "controls_right_col", colWidth, 0, reaper.ImGui_WindowFlags_NoScrollbar())
+          reaper.ImGui_PushItemWidth(ctx, colWidth * 0.60)
+
+          local changed2, newVal2 = reaper.ImGui_SliderDouble(ctx, "##reduction", reduction, -80, 0, "%.1f")
+          if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_IsMouseClicked(ctx, 1) then
+            reduction = DEFAULT_REDUCTION
+            statusMessage = "Reduction reset"
+            refreshWaveform()
+          elseif changed2 then
+            reduction = newVal2
+          end
+          local isActive2 = reaper.ImGui_IsItemActive(ctx)
+          if sliderWasActive["reduction"] and not isActive2 then
+            refreshWaveform()
+          end
+          sliderWasActive["reduction"] = isActive2
+          reaper.ImGui_SameLine(ctx)
+          reaper.ImGui_Text(ctx, "Reduction (dB)")
+          reaper.ImGui_Spacing(ctx)
+
+          changed2, newVal2 = reaper.ImGui_SliderDouble(ctx, "##detectionMs", detectionMs, 1, 50, "%.0f")
+          if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_IsMouseClicked(ctx, 1) then
+            detectionMs = DEFAULT_DETECTION_MS
+            statusMessage = "Detection reset"
+            refreshWaveform()
+          elseif changed2 then
+            detectionMs = newVal2
+          end
+          isActive2 = reaper.ImGui_IsItemActive(ctx)
+          if sliderWasActive["detectionMs"] and not isActive2 then
+            refreshWaveform()
+          end
+          sliderWasActive["detectionMs"] = isActive2
+          reaper.ImGui_SameLine(ctx)
+          reaper.ImGui_Text(ctx, "Detection (ms)")
+          reaper.ImGui_Spacing(ctx)
+
+          changed2, newVal2 = reaper.ImGui_SliderDouble(ctx, "##envelopeMs", envelopeMs, 0.1, 5, "%.1f")
+          if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_IsMouseClicked(ctx, 1) then
+            envelopeMs = DEFAULT_ENVELOPE_MS
+            statusMessage = "Envelope reset"
+          elseif changed2 then
+            envelopeMs = newVal2
+          end
+          reaper.ImGui_SameLine(ctx)
+          reaper.ImGui_Text(ctx, "Envelope (ms)")
+          reaper.ImGui_Spacing(ctx)
+
+          changed2, newVal2 = reaper.ImGui_SliderDouble(ctx, "##rawWaveformOpacity", rawWaveformOpacity, 0, 100, "%.0f%%")
+          if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_IsMouseClicked(ctx, 1) then
+            rawWaveformOpacity = DEFAULT_RAW_WAVEFORM_OPACITY
+            statusMessage = "Raw Waveform Opacity reset"
+            waveformNeedsRedraw = true
+          elseif changed2 then
+            rawWaveformOpacity = newVal2
+            waveformNeedsRedraw = true
+          end
+          reaper.ImGui_SameLine(ctx)
+          reaper.ImGui_Text(ctx, "Raw Opacity")
+          reaper.ImGui_Spacing(ctx)
+
+          changed2, newVal2 = reaper.ImGui_SliderDouble(ctx, "##sibilanceOpacity", sibilanceOpacity, 0, 100, "%.0f%%")
+          if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_IsMouseClicked(ctx, 1) then
+            sibilanceOpacity = DEFAULT_SIBILANCE_OPACITY
+            statusMessage = "Sibilance Opacity reset"
+            waveformNeedsRedraw = true
+          elseif changed2 then
+            sibilanceOpacity = newVal2
+            waveformNeedsRedraw = true
+          end
+          reaper.ImGui_SameLine(ctx)
+          reaper.ImGui_Text(ctx, "Sibilance Opacity")
+
+          reaper.ImGui_PopItemWidth(ctx)
+        reaper.ImGui_EndChild(ctx)
+      end
+    end
+
+    -- Waveform rendering
+    if waveformData and #waveformData > 0 then
+      if lastPlotW ~= plotW or lastPlotH ~= plotH then waveformNeedsRedraw = true; lastPlotW, lastPlotH = plotW, plotH end
+      if lastZoomLevel ~= zoomLevel or lastZoomCenter ~= zoomCenter then waveformNeedsRedraw = true; lastZoomLevel, lastZoomCenter = zoomLevel, zoomCenter end
+
+      local x, y, w, h = getPinnedWaveformRect(plotH)
+      local totalSamples = #waveformData
+      local visibleSamples = math.max(50, math.floor(totalSamples / zoomLevel))
+      local startSample = math.max(1, math.min(totalSamples - visibleSamples, math.floor(zoomCenter * totalSamples - visibleSamples / 2)))
+
+      local mouse_x, mouse_y = reaper.ImGui_GetMousePos(ctx)
+      local isInside = (mouse_x >= x and mouse_x <= x + w and mouse_y >= y and mouse_y <= y + h)
+
+      if isInside and reaper.ImGui_IsMouseClicked(ctx, 0) and not isDragging then
+        local item = reaper.GetSelectedMediaItem(0, 0)
+        if item then
+          local take = reaper.GetActiveTake(item)
+          if take then
+            local aa, aaStart, aaEnd, samplerate, itemLen = get_accessor_bounds(take)
+            if aa then
+              -- Calculate which sample was clicked
+              local relX = (mouse_x - x) / w
+              local samplePos = startSample + relX * visibleSamples
+              local clickTime = (samplePos / totalSamples) * itemLen
+              
+              -- Get item position in project
+              local itemStart = reaper.GetMediaItemInfo_Value(item, "D_POSITION")
+              
+              -- Set edit cursor to the clicked position
+              local cursorPos = itemStart + clickTime
+              reaper.SetEditCurPos(cursorPos, false, false)
+              
+              statusMessage = string.format("Edit cursor set to %.3f", cursorPos)
+            end
+          end
+        end
+      end
+
+      if isInside and reaper.ImGui_IsMouseClicked(ctx, 0) and not isDragging then
+        isDragging = true
+        dragStartY = mouse_y
+        dragStartZoom = zoomLevel
+        local total = #waveformData
+        local vis = math.max(50, math.floor(total / zoomLevel))
+        local startSamp = math.max(1, math.min(total - vis, math.floor(zoomCenter * total - vis / 2)))
+        local relX = (mouse_x - x) / w
+        dragStartCursorSample = startSamp + relX * vis
+      end
+
+      if isDragging then
+        if reaper.ImGui_IsMouseReleased(ctx, 0) then
+          isDragging = false
+        else
+          local deltaY = dragStartY - mouse_y
+          local zoomFactor = 1 + (deltaY / 100)
+          local newZoom = math.max(1.0, math.min(100.0, dragStartZoom * zoomFactor))
+          local total = #waveformData
+          local newVis = math.max(50, math.floor(total / newZoom))
+          local relX = (mouse_x - x) / w
+          local newStart = dragStartCursorSample - relX * newVis
+          newStart = math.max(1, math.min(total - newVis, newStart))
+          zoomCenter = (newStart + newVis / 2) / total
+          zoomCenter = math.max(0, math.min(1, zoomCenter))
+          zoomLevel = newZoom
+          waveformNeedsRedraw = true
+        end
+      end
+
+      local fg = reaper.ImGui_GetForegroundDrawList(ctx)
+      reaper.ImGui_DrawList_AddRectFilled(fg, x, y, x + w, y + h, 0x1A1A1AFF)
+      drawWaveform(fg, rawWaveformData, waveformData, x, y, w, h, minDB, maxDB, curvePower, zoomLevel, zoomCenter, sibilanceOpacity, rawWaveformOpacity)
+      reaper.ImGui_DrawList_AddRect(fg, x, y, x + w, y + h, 0x808080FF, 0, 0, 1)
+
+      local item = reaper.GetSelectedMediaItem(0, 0)
+      drawPlayhead(fg, item, x, y, w, h, zoomLevel, zoomCenter, totalSamples, startSample, visibleSamples)
+      drawTimeRuler(fg, item, x, y + h, w, rulerH, zoomLevel, zoomCenter, totalSamples, startSample, visibleSamples)
+    else
+      reaper.ImGui_Text(ctx, "No waveform - select item and click Refresh")
+    end
+
+    reaper.ImGui_End(ctx)
+  end
+
+  PopTheme()
+  if open then reaper.defer(loop) end
+end
+
+loop()
