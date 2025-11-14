@@ -30,7 +30,7 @@ local DEFAULT_GATE_ENABLED = false
 local DEFAULT_GATE_THRESHOLD = -40
 local DEFAULT_GATE_HOLD_TIME = 0.3
 local DEFAULT_GATE_REDUCTION = -60
-local DEFAULT_GATE_ONSET_TIME = 0.04
+local DEFAULT_GATE_ONSET_TIME = 0.1
 
 -- Debug toggle
 local showDebug = false
@@ -546,8 +546,8 @@ local function drawWaveform(drawList, rawData, adjustedData, x, y, width, height
     local negDB = linearTodB(adjustedData[i].neg)
     local posH = dbToHeight(posDB, height / 2)
     local negH = dbToHeight(negDB, height / 2)
-    if posH > 0 then reaper.ImGui_DrawList_AddRectFilled(drawList, barX, centerY - posH, barX + barWidth + 1, centerY, 0x4080FFFF) end
-    if negH > 0 then reaper.ImGui_DrawList_AddRectFilled(drawList, barX, centerY, barX + barWidth + 1, centerY + negH, 0x4080FFFF) end
+    if posH > 0 then reaper.ImGui_DrawList_AddRectFilled(drawList, barX, centerY - posH, barX + barWidth + 1, centerY, 0x4080FF9E) end
+    if negH > 0 then reaper.ImGui_DrawList_AddRectFilled(drawList, barX, centerY, barX + barWidth + 1, centerY + negH, 0x4080FF9E) end
   end
 
   local dbMarks = {0, -6, -12, -18, -24, -30, -40, -60, -80, -100, -120}
@@ -1239,7 +1239,7 @@ local function loop()
     -- Define height tiers for progressive control hiding
     local MIN_HEIGHT_WAVEFORM_ONLY = 0
     local MIN_HEIGHT_WITH_STATUS = 350
-    local MIN_HEIGHT_ONE_TAB = 500
+    local MIN_HEIGHT_ONE_TAB = 450
     
     local showWaveform = winH >= MIN_HEIGHT_WAVEFORM_ONLY
     local showStatus = winH >= MIN_HEIGHT_WITH_STATUS
