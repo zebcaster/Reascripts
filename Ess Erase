@@ -822,14 +822,14 @@ local function loop()
             reduction = DEFAULT_REDUCTION
             statusMessage = "Reduction reset"
             refreshWaveform()
-          elseif changed2 then
-            reduction = newVal2
+          elseif changed then
+            reduction = newVal
           end
-          local isActive2 = reaper.ImGui_IsItemActive(ctx)
-          if sliderWasActive["reduction"] and not isActive2 then
+          local isActive = reaper.ImGui_IsItemActive(ctx)
+          if sliderWasActive["reduction"] and not isActive then
             refreshWaveform()
           end
-          sliderWasActive["reduction"] = isActive2
+          sliderWasActive["reduction"] = isActive
           reaper.ImGui_SameLine(ctx)
           reaper.ImGui_Text(ctx, "Reduction (dB)")
 
