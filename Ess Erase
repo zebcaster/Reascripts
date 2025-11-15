@@ -14,7 +14,7 @@ local SCRIPT_NAME = "De-Esser"
 local DEFAULT_FREQ_LOW = 4000
 local DEFAULT_FREQ_HIGH = 14000
 local DEFAULT_THRESHOLD = -20
-local DEFAULT_REDUCTION = -12
+local DEFAULT_REDUCTION = -6
 local DEFAULT_ATTACK_TIME = 0.01
 local DEFAULT_RELEASE_TIME = 0.1
 local DEFAULT_NUM_BARS = 10000
@@ -817,7 +817,7 @@ local function loop()
           reaper.ImGui_Text(ctx, "Threshold (dB)")
           reaper.ImGui_Spacing(ctx)
           
-          changed, newVal = reaper.ImGui_SliderDouble(ctx, "##reduction", reduction, -80, 0, "%.1f")
+          changed, newVal = reaper.ImGui_SliderDouble(ctx, "##reduction", reduction, -24, 0, "%.1f")
           if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_IsMouseClicked(ctx, 1) then
             reduction = DEFAULT_REDUCTION
             statusMessage = "Reduction reset"
