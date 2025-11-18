@@ -1,4 +1,4 @@
--- @description De-Esser
+a-- @description De-Esser
 -- @author ChimRichalds
 -- @version 1.0
 
@@ -24,6 +24,7 @@ local DEFAULT_CURVE_POWER = 14.0
 local DEFAULT_DETECTION_MS = 10
 local DEFAULT_ENVELOPE_MS = 1
 local DEFAULT_SIBILANCE_OPACITY = 60
+local DEFAULT_FREQ_LOG_SCALING = 7.0
 
 -- Debug toggle
 local showDebug = false
@@ -41,8 +42,6 @@ end
 local function setExtState(key, value)
   reaper.SetExtState(SCRIPT_NAME, key, tostring(value), true)
 end
-
--- Load/Save Settings
 local function loadSettings()
   local freqLow = getExtState("freqLow", DEFAULT_FREQ_LOW)
   local freqHigh = getExtState("freqHigh", DEFAULT_FREQ_HIGH)
@@ -58,11 +57,15 @@ local function loadSettings()
   local envelopeMs = getExtState("envelopeMs", DEFAULT_ENVELOPE_MS)
   local sibilanceOpacity = getExtState("sibilanceOpacity", DEFAULT_SIBILANCE_OPACITY)
   local showTooltips = getExtState("showTooltips", 1) == 1
+  local rawWaveformOpacity = getExtState("rawWaveformOpacity", DEFAULT_RAW_WAVEFORM_OPACITY)
+  local numFreqBins = getExtState("numFreqBins", 128)
+  local numTimeBins = getExtState("numTimeBins", 256)
+  local freqLogScaling = getExtState("freqLogScaling", DEFAULT_FREQ_LOG_SCALING)
   
-  return freqLow, freqHigh, threshold, reduction, attackTime, releaseTime, numBars, minDB, maxDB, curvePower, detectionMs, envelopeMs, sibilanceOpacity, showTooltips
+  return freqLow, freqHigh, threshold, reduction, attackTime, releaseTime, numBars, minDB, maxDB, curvePower, detectionMs, envelopeMs, sibilanceOpacity, showTooltips, rawWaveformOpacity, numFreqBins, numTimeBins, freqLogScaling
 end
 
-local function saveSettings(freqLow, freqHigh, threshold, reduction, attackTime, releaseTime, detectionMs, envelopeMs, sibilanceOpacity, showTooltips)
+local function saveSettings(freqLow, freqHigh, threshold, reduction, attackTime, releaseTime, detectionMs, envelopeMs, sibilanceOpacity, showTooltips, rawWaveformOpacity, numFreqBins, numTimeBins, freqLogScaling)
   setExtState("freqLow", freqLow)
   setExtState("freqHigh", freqHigh)
   setExtState("threshold", threshold)
@@ -73,7 +76,12 @@ local function saveSettings(freqLow, freqHigh, threshold, reduction, attackTime,
   setExtState("envelopeMs", envelopeMs)
   setExtState("sibilanceOpacity", sibilanceOpacity)
   setExtState("showTooltips", showTooltips and 1 or 0)
+  setExtState("rawWaveformOpacity", rawWaveformOpacity)
+  setExtState("numFreqBins", numFreqBins)
+  setExtState("numTimeBins", numTimeBins)
+  setExtState("freqLogScaling", freqLogScaling)
 end
+
 
 -- Conversion
 local function dBToLinear(dB)
@@ -458,7 +466,7 @@ local function drawWaveform(drawList, rawData, processedData, x, y, width, heigh
 end
 
 -- Spectrogram drawing with logarithmic frequency scaling
-local function drawSpectrogram(drawList, spectrogram, x, y, w, h, minDB, maxDB, freqLow, freqHigh, zoomLevel, zoomCenter, mouseX, mouseY)
+local function drawSpectrogram(drawList, spectrogram, x, y, w, h, minDB, maxDB, freqLow, freqHigh, zoomLevel, zoomCenter, mouseX, mouseY, freqLogScaling)
   if not spectrogram or #spectrogram == 0 then return end
   
   reaper.ImGui_DrawList_AddRectFilled(drawList, x, y, x + w, y + h, 0x1A1A1AFF)
@@ -471,7 +479,7 @@ local function drawSpectrogram(drawList, spectrogram, x, y, w, h, minDB, maxDB, 
   if dbRange <= 0 then dbRange = 1 end
   
   -- Logarithmic frequency scaling parameters
-  local freqLogScaling = 7.0  -- Adjust this value to control emphasis on lower frequencies
+  --local freqLogScaling = 7.0  -- Adjust this value to control emphasis on lower frequencies
   local nyquist = 24000  -- Adjust based on your sample rate
   
   -- Apply zoom/pan to time dimension
@@ -805,8 +813,16 @@ local lastPlotW, lastPlotH = 0, 0
 local isDragging, dragStartY, dragStartZoom, dragStartCursorSample = false, 0, 1.0, 0
 
 local sliderWasActive = {}
+local tabState = {
+  currentTab = 1  -- 1 = Controls, 2 = Display
+}
+
+local sliderWasActive = {}
+local numFreqBins = 128  -- Add to your loadSettings/saveSettings
+local numTimeBins = 256  -- Add to your loadSettings/saveSettings
 local DEFAULT_RAW_WAVEFORM_OPACITY = 30
 local rawWaveformOpacity = DEFAULT_RAW_WAVEFORM_OPACITY
+local freqLogScaling = 7.0
 
 local function getPinnedWaveformRect(plotHeight)
   local winPosX, winPosY = reaper.ImGui_GetWindowPos(ctx)
@@ -961,7 +977,7 @@ local function loop()
         reaper.ImGui_SameLine(ctx, contentWidth - totalButtonWidth)
         
         if reaper.ImGui_Button(ctx, "Apply", 110, 25) then
-          saveSettings(freqLow, freqHigh, threshold, reduction, attackTime, releaseTime, detectionMs, envelopeMs, sibilanceOpacity, showTooltips)
+          saveSettings(freqLow, freqHigh, threshold, reduction, attackTime, releaseTime, detectionMs, envelopeMs, sibilanceOpacity, showTooltips, rawWaveformOpacity, numFreqBins, numTimeBins)
           reaper.Undo_BeginBlock()
           local cnt, processed, totalApply = reaper.CountSelectedMediaItems(0), 0, 0
           
@@ -995,6 +1011,9 @@ local function loop()
           detectionMs = DEFAULT_DETECTION_MS
           envelopeMs = DEFAULT_ENVELOPE_MS
           sibilanceOpacity = DEFAULT_SIBILANCE_OPACITY
+          rawWaveformOpacity = DEFAULT_RAW_WAVEFORM_OPACITY
+          numFreqBins = 128
+          numTimeBins = 256
           statusMessage = "Settings reset to defaults"
           refreshWaveform()
         end
@@ -1002,152 +1021,274 @@ local function loop()
       
       reaper.ImGui_Spacing(ctx)
       
-      local gap = 28
-      local colWidth = math.max(220, math.min(360, (contentWidth - gap) / 2))
-      local totalControlsW = (colWidth * 2) + gap
-      local leftPad = math.max(0, (contentWidth - totalControlsW) / 2)
-
-      if contentWidth < 500 then
-        reaper.ImGui_Text(ctx, "Window too narrow for controls")
-      else
-        reaper.ImGui_Dummy(ctx, leftPad, 0)
-        reaper.ImGui_SameLine(ctx)
-
-        reaper.ImGui_BeginChild(ctx, "controls_left_col", colWidth, 0, reaper.ImGui_WindowFlags_NoScrollbar())
-          reaper.ImGui_PushItemWidth(ctx, colWidth * 0.60)
-
-          local changed, newVal = reaper.ImGui_SliderInt(ctx, "##freqLow", freqLow, 1000, 10000)
-          if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_IsMouseClicked(ctx, 1) then
-            freqLow = DEFAULT_FREQ_LOW
-            statusMessage = "Freq Low reset"
-            refreshWaveform()
-          elseif changed then
-            freqLow = newVal
-            if freqHigh <= freqLow then freqHigh = freqLow + 1000 end
-          end
-          local isActive = reaper.ImGui_IsItemActive(ctx)
-          if sliderWasActive["freqLow"] and not isActive then
-            refreshWaveform()
-          end
-          sliderWasActive["freqLow"] = isActive
-          reaper.ImGui_SameLine(ctx)
-          reaper.ImGui_Text(ctx, "Low Freq (Hz)")
+      local MIN_HEIGHT_WITH_STATUS = 350
+      local MIN_HEIGHT_WITH_TABS = 450
+      local showStatus = winH >= MIN_HEIGHT_WITH_STATUS
+      local showTabs = winH >= MIN_HEIGHT_WITH_TABS
+      
+      
+      if showTabs then
+        reaper.ImGui_Spacing(ctx)
+        local minTabWidth = 350
+        if contentWidth < minTabWidth then
+          reaper.ImGui_Text(ctx, "Window too narrow for tab controls")
           reaper.ImGui_Spacing(ctx)
-
-          changed, newVal = reaper.ImGui_SliderInt(ctx, "##freqHigh", freqHigh, 1000, 20000)
-          if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_IsMouseClicked(ctx, 1) then
-            freqHigh = DEFAULT_FREQ_HIGH
-            statusMessage = "Freq High reset"
-            refreshWaveform()
-          elseif changed then
-            freqHigh = newVal
-            if freqLow >= freqHigh then freqLow = freqHigh - 1000 end
-          end
-          isActive = reaper.ImGui_IsItemActive(ctx)
-          if sliderWasActive["freqHigh"] and not isActive then
-            refreshWaveform()
-          end
-          sliderWasActive["freqHigh"] = isActive
-          reaper.ImGui_SameLine(ctx)
-          reaper.ImGui_Text(ctx, "High Freq (Hz)")
-          reaper.ImGui_Spacing(ctx)
-
-          changed, newVal = reaper.ImGui_SliderDouble(ctx, "##threshold", threshold, -80, 0, "%.1f")
-          if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_IsMouseClicked(ctx, 1) then
-            threshold = DEFAULT_THRESHOLD
-            statusMessage = "Threshold reset"
-            refreshWaveform()
-          elseif changed then
-            threshold = newVal
-          end
-          isActive = reaper.ImGui_IsItemActive(ctx)
-          if sliderWasActive["threshold"] and not isActive then
-            refreshWaveform()
-          end
-          sliderWasActive["threshold"] = isActive
-          reaper.ImGui_SameLine(ctx)
-          reaper.ImGui_Text(ctx, "Threshold (dB)")
-          reaper.ImGui_Spacing(ctx)
+        else
+          local tabButtonWidth = 100
+          local tabButtonGap = 0
+          local totalTabWidth = (tabButtonWidth * 2) + (tabButtonGap * 1)
+          local tabLeftPad = math.max(0, (contentWidth - totalTabWidth) / 2)
           
-          changed, newVal = reaper.ImGui_SliderDouble(ctx, "##reduction", reduction, -24, 0, "%.1f")
-          if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_IsMouseClicked(ctx, 1) then
-            reduction = DEFAULT_REDUCTION
-            statusMessage = "Reduction reset"
-            refreshWaveform()
-          elseif changed then
-            reduction = newVal
-          end
-          isActive = reaper.ImGui_IsItemActive(ctx)
-          if sliderWasActive["reduction"] and not isActive then
-            refreshWaveform()
-          end
-          sliderWasActive["reduction"] = isActive
+          reaper.ImGui_Dummy(ctx, tabLeftPad, 0)
           reaper.ImGui_SameLine(ctx)
-          reaper.ImGui_Text(ctx, "Reduction (dB)")
-
-          reaper.ImGui_PopItemWidth(ctx)
-        reaper.ImGui_EndChild(ctx)
-
-        reaper.ImGui_SameLine(ctx, 0, gap)
-
-        reaper.ImGui_BeginChild(ctx, "controls_right_col", colWidth, 0, reaper.ImGui_WindowFlags_NoScrollbar())
-          reaper.ImGui_PushItemWidth(ctx, colWidth * 0.60)
-
-          local changed2, newVal2 = reaper.ImGui_SliderDouble(ctx, "##detectionMs", detectionMs, 1, 50, "%.0f")
-          if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_IsMouseClicked(ctx, 1) then
-            detectionMs = DEFAULT_DETECTION_MS
-            statusMessage = "Detection reset"
-            refreshWaveform()
-          elseif changed2 then
-            detectionMs = newVal2
+          
+          local tabBg1 = tabState.currentTab == 1 and 0x4080FFFF or 0x404040FF
+          local tabBg2 = tabState.currentTab == 2 and 0x4080FFFF or 0x404040FF
+          local tabText1 = tabState.currentTab == 1 and 0xFFFFFFFF or 0xAAAAAAAA
+          local tabText2 = tabState.currentTab == 2 and 0xFFFFFFFF or 0xAAAAAAAA
+          
+          local fg = reaper.ImGui_GetForegroundDrawList(ctx)
+          local tabX, tabY = reaper.ImGui_GetCursorScreenPos(ctx)
+          
+          reaper.ImGui_DrawList_AddRectFilled(fg, tabX, tabY, tabX + tabButtonWidth, tabY + 32, tabBg1, 4)
+          local textW1, textH1 = reaper.ImGui_CalcTextSize(ctx, "Controls")
+          reaper.ImGui_DrawList_AddText(fg, tabX + (tabButtonWidth - textW1) / 2, tabY + (32 - textH1) / 2, tabText1, "Controls")
+         
+          reaper.ImGui_DrawList_AddRectFilled(fg, tabX + tabButtonWidth, tabY, tabX + tabButtonWidth * 2, tabY + 32, tabBg2, 4)
+          local textW2, textH2 = reaper.ImGui_CalcTextSize(ctx, "Display")
+          reaper.ImGui_DrawList_AddText(fg, tabX + tabButtonWidth + (tabButtonWidth - textW2) / 2, tabY + (32 - textH2) / 2, tabText2, "Display")
+          
+          reaper.ImGui_SetCursorScreenPos(ctx, tabX, tabY)
+          if reaper.ImGui_InvisibleButton(ctx, "tab1", tabButtonWidth, 32) then
+            tabState.currentTab = 1
           end
-          isActive2 = reaper.ImGui_IsItemActive(ctx)
-          if sliderWasActive["detectionMs"] and not isActive2 then
-            refreshWaveform()
+          reaper.ImGui_SameLine(ctx, 0, 0)
+          if reaper.ImGui_InvisibleButton(ctx, "tab2", tabButtonWidth, 32) then
+            tabState.currentTab = 2
           end
-          sliderWasActive["detectionMs"] = isActive2
-          reaper.ImGui_SameLine(ctx)
-          reaper.ImGui_Text(ctx, "Detection (ms)")
+          
           reaper.ImGui_Spacing(ctx)
-
-          changed2, newVal2 = reaper.ImGui_SliderDouble(ctx, "##envelopeMs", envelopeMs, 0.1, 5, "%.1f")
-          if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_IsMouseClicked(ctx, 1) then
-            envelopeMs = DEFAULT_ENVELOPE_MS
-            statusMessage = "Envelope reset"
-          elseif changed2 then
-            envelopeMs = newVal2
+      
+          if tabState.currentTab == 1 then
+            -- CONTROLS TAB
+            local gap = 28
+            local colWidth = math.max(220, math.min(360, (contentWidth - gap) / 2))
+            local totalControlsW = (colWidth * 2) + gap
+            local leftPad = math.max(0, (contentWidth - totalControlsW) / 2)
+      
+            if contentWidth < 500 then
+              reaper.ImGui_Text(ctx, "Window too narrow for controls")
+              reaper.ImGui_Spacing(ctx)
+            else
+              reaper.ImGui_Dummy(ctx, leftPad, 0)
+              reaper.ImGui_SameLine(ctx)
+      
+              reaper.ImGui_BeginChild(ctx, "controls_left_col", colWidth, 0, reaper.ImGui_WindowFlags_NoScrollbar())
+                reaper.ImGui_PushItemWidth(ctx, colWidth * 0.60)
+      
+                local changed, newVal = reaper.ImGui_SliderInt(ctx, "##freqLow", freqLow, 1000, 10000)
+                if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_IsMouseClicked(ctx, 1) then
+                  freqLow = DEFAULT_FREQ_LOW
+                  statusMessage = "Freq Low reset"
+                  refreshWaveform()
+                elseif changed then
+                  freqLow = newVal
+                  if freqHigh <= freqLow then freqHigh = freqLow + 1000 end
+                end
+                local isActive = reaper.ImGui_IsItemActive(ctx)
+                if sliderWasActive["freqLow"] and not isActive then
+                  refreshWaveform()
+                end
+                sliderWasActive["freqLow"] = isActive
+                reaper.ImGui_SameLine(ctx)
+                reaper.ImGui_Text(ctx, "Low Freq (Hz)")
+                reaper.ImGui_Spacing(ctx)
+      
+                changed, newVal = reaper.ImGui_SliderInt(ctx, "##freqHigh", freqHigh, 1000, 20000)
+                if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_IsMouseClicked(ctx, 1) then
+                  freqHigh = DEFAULT_FREQ_HIGH
+                  statusMessage = "Freq High reset"
+                  refreshWaveform()
+                elseif changed then
+                  freqHigh = newVal
+                  if freqLow >= freqHigh then freqLow = freqHigh - 1000 end
+                end
+                isActive = reaper.ImGui_IsItemActive(ctx)
+                if sliderWasActive["freqHigh"] and not isActive then
+                  refreshWaveform()
+                end
+                sliderWasActive["freqHigh"] = isActive
+                reaper.ImGui_SameLine(ctx)
+                reaper.ImGui_Text(ctx, "High Freq (Hz)")
+                reaper.ImGui_Spacing(ctx)
+      
+                changed, newVal = reaper.ImGui_SliderDouble(ctx, "##threshold", threshold, -80, 0, "%.1f")
+                if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_IsMouseClicked(ctx, 1) then
+                  threshold = DEFAULT_THRESHOLD
+                  statusMessage = "Threshold reset"
+                  refreshWaveform()
+                elseif changed then
+                  threshold = newVal
+                end
+                isActive = reaper.ImGui_IsItemActive(ctx)
+                if sliderWasActive["threshold"] and not isActive then
+                  refreshWaveform()
+                end
+                sliderWasActive["threshold"] = isActive
+                reaper.ImGui_SameLine(ctx)
+                reaper.ImGui_Text(ctx, "Threshold (dB)")
+                reaper.ImGui_Spacing(ctx)
+                
+                changed, newVal = reaper.ImGui_SliderDouble(ctx, "##reduction", reduction, -24, 0, "%.1f")
+                if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_IsMouseClicked(ctx, 1) then
+                  reduction = DEFAULT_REDUCTION
+                  statusMessage = "Reduction reset"
+                  refreshWaveform()
+                elseif changed then
+                  reduction = newVal
+                end
+                isActive = reaper.ImGui_IsItemActive(ctx)
+                if sliderWasActive["reduction"] and not isActive then
+                  refreshWaveform()
+                end
+                sliderWasActive["reduction"] = isActive
+                reaper.ImGui_SameLine(ctx)
+                reaper.ImGui_Text(ctx, "Reduction (dB)")
+      
+                reaper.ImGui_PopItemWidth(ctx)
+              reaper.ImGui_EndChild(ctx)
+      
+              reaper.ImGui_SameLine(ctx, 0, gap)
+      
+              reaper.ImGui_BeginChild(ctx, "controls_right_col", colWidth, 0, reaper.ImGui_WindowFlags_NoScrollbar())
+                reaper.ImGui_PushItemWidth(ctx, colWidth * 0.60)
+      
+                local changed2, newVal2 = reaper.ImGui_SliderDouble(ctx, "##detectionMs", detectionMs, 1, 50, "%.0f")
+                if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_IsMouseClicked(ctx, 1) then
+                  detectionMs = DEFAULT_DETECTION_MS
+                  statusMessage = "Detection reset"
+                  refreshWaveform()
+                elseif changed2 then
+                  detectionMs = newVal2
+                end
+                isActive2 = reaper.ImGui_IsItemActive(ctx)
+                if sliderWasActive["detectionMs"] and not isActive2 then
+                  refreshWaveform()
+                end
+                sliderWasActive["detectionMs"] = isActive2
+                reaper.ImGui_SameLine(ctx)
+                reaper.ImGui_Text(ctx, "Detection (ms)")
+                reaper.ImGui_Spacing(ctx)
+      
+                changed2, newVal2 = reaper.ImGui_SliderDouble(ctx, "##envelopeMs", envelopeMs, 0.1, 5, "%.1f")
+                if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_IsMouseClicked(ctx, 1) then
+                  envelopeMs = DEFAULT_ENVELOPE_MS
+                  statusMessage = "Envelope reset"
+                elseif changed2 then
+                  envelopeMs = newVal2
+                end
+                reaper.ImGui_SameLine(ctx)
+                reaper.ImGui_Text(ctx, "Envelope (ms)")
+      
+                reaper.ImGui_PopItemWidth(ctx)
+              reaper.ImGui_EndChild(ctx)
+            end
+      
+          elseif tabState.currentTab == 2 then
+            -- DISPLAY TAB
+            local gap = 28
+            local colWidth = math.max(220, math.min(360, (contentWidth - gap) / 2))
+            local totalControlsW = (colWidth * 2) + gap
+            local leftPad = math.max(0, (contentWidth - totalControlsW) / 2)
+      
+            if contentWidth < 500 then
+              reaper.ImGui_Text(ctx, "Window too narrow for display controls")
+              reaper.ImGui_Spacing(ctx)
+            else
+              reaper.ImGui_Dummy(ctx, leftPad, 0)
+              reaper.ImGui_SameLine(ctx)
+      
+              reaper.ImGui_BeginChild(ctx, "display_left_col", colWidth, 0, reaper.ImGui_WindowFlags_NoScrollbar())
+                reaper.ImGui_PushItemWidth(ctx, colWidth * 0.60)
+      
+                local changed, newVal = reaper.ImGui_SliderInt(ctx, "##rawWaveformOpacity", rawWaveformOpacity, 0, 100)
+                if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_IsMouseClicked(ctx, 1) then
+                  rawWaveformOpacity = DEFAULT_RAW_WAVEFORM_OPACITY
+                  statusMessage = "Raw Opacity reset"
+                  waveformNeedsRedraw = true
+                elseif changed then
+                  rawWaveformOpacity = newVal
+                  waveformNeedsRedraw = true
+                end
+                reaper.ImGui_SameLine(ctx)
+                reaper.ImGui_Text(ctx, "Raw Waveform Opacity (%)")
+                reaper.ImGui_Spacing(ctx)
+      
+                changed, newVal = reaper.ImGui_SliderInt(ctx, "##numFreqBins", numFreqBins, 64, 512)
+                if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_IsMouseClicked(ctx, 1) then
+                  numFreqBins = 128
+                  statusMessage = "Freq Precision reset"
+                  waveformNeedsRedraw = true
+                elseif changed then
+                  numFreqBins = newVal
+                  waveformNeedsRedraw = true
+                end
+                reaper.ImGui_SameLine(ctx)
+                reaper.ImGui_Text(ctx, "Freq Precision (bins)")
+                reaper.ImGui_Spacing(ctx)
+      
+                reaper.ImGui_PopItemWidth(ctx)
+              reaper.ImGui_EndChild(ctx)
+      
+              reaper.ImGui_SameLine(ctx, 0, gap)
+      
+              reaper.ImGui_BeginChild(ctx, "display_right_col", colWidth, 0, reaper.ImGui_WindowFlags_NoScrollbar())
+                reaper.ImGui_PushItemWidth(ctx, colWidth * 0.60)
+      
+                local changed2, newVal2 = reaper.ImGui_SliderDouble(ctx, "##sibilanceOpacity2", sibilanceOpacity, 0, 100, "%.0f%%")
+                if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_IsMouseClicked(ctx, 1) then
+                  sibilanceOpacity = DEFAULT_SIBILANCE_OPACITY
+                  statusMessage = "Sibilance Opacity reset"
+                  waveformNeedsRedraw = true
+                elseif changed2 then
+                  sibilanceOpacity = newVal2
+                  waveformNeedsRedraw = true
+                end
+                reaper.ImGui_SameLine(ctx)
+                reaper.ImGui_Text(ctx, "Sibilance Opacity (%)")
+                reaper.ImGui_Spacing(ctx)
+      
+                changed2, newVal2 = reaper.ImGui_SliderInt(ctx, "##numTimeBins", numTimeBins, 64, 512)
+                if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_IsMouseClicked(ctx, 1) then
+                  numTimeBins = 256
+                  statusMessage = "Time Precision reset"
+                  waveformNeedsRedraw = true
+                elseif changed2 then
+                  numTimeBins = newVal2
+                  waveformNeedsRedraw = true
+                end
+                reaper.ImGui_SameLine(ctx)
+                reaper.ImGui_Text(ctx, "Time Precision (bins)")
+                reaper.ImGui_Spacing(ctx)
+                
+                changed2, newVal2 = reaper.ImGui_SliderDouble(ctx, "##freqLogScaling", freqLogScaling, 1.0, 15.0, "%.1f")
+                if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_IsMouseClicked(ctx, 1) then
+                  freqLogScaling = 7.0
+                  statusMessage = "Freq Log Scaling reset"
+                  waveformNeedsRedraw = true
+                elseif changed2 then
+                  freqLogScaling = newVal2
+                  waveformNeedsRedraw = true
+                end
+                reaper.ImGui_SameLine(ctx)
+                reaper.ImGui_Text(ctx, "Freq Log Scaling")
+                reaper.ImGui_Spacing(ctx)
+      
+                reaper.ImGui_PopItemWidth(ctx)
+              reaper.ImGui_EndChild(ctx)
+            end
           end
-          reaper.ImGui_SameLine(ctx)
-          reaper.ImGui_Text(ctx, "Envelope (ms)")
-          reaper.ImGui_Spacing(ctx)
-
-          changed2, newVal2 = reaper.ImGui_SliderDouble(ctx, "##rawWaveformOpacity", rawWaveformOpacity, 0, 100, "%.0f%%")
-          if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_IsMouseClicked(ctx, 1) then
-            rawWaveformOpacity = DEFAULT_RAW_WAVEFORM_OPACITY
-            statusMessage = "Raw Waveform Opacity reset"
-            waveformNeedsRedraw = true
-          elseif changed2 then
-            rawWaveformOpacity = newVal2
-            waveformNeedsRedraw = true
-          end
-          reaper.ImGui_SameLine(ctx)
-          reaper.ImGui_Text(ctx, "Raw Opacity")
-          reaper.ImGui_Spacing(ctx)
-
-          changed2, newVal2 = reaper.ImGui_SliderDouble(ctx, "##sibilanceOpacity", sibilanceOpacity, 0, 100, "%.0f%%")
-          if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_IsMouseClicked(ctx, 1) then
-            sibilanceOpacity = DEFAULT_SIBILANCE_OPACITY
-            statusMessage = "Sibilance Opacity reset"
-            waveformNeedsRedraw = true
-          elseif changed2 then
-            sibilanceOpacity = newVal2
-            waveformNeedsRedraw = true
-          end
-          reaper.ImGui_SameLine(ctx)
-          reaper.ImGui_Text(ctx, "Sibilance Opacity")
-
-          reaper.ImGui_PopItemWidth(ctx)
-        reaper.ImGui_EndChild(ctx)
+        end
       end
     end
 
@@ -1248,7 +1389,7 @@ local function loop()
             if take then
               -- Time the spectrogram computation
               local t0 = reaper.time_precise()
-              waveformData.spectrogram = computeSpectrogram(take, item, 128, 256, freqLow, freqHigh)
+              waveformData.spectrogram = computeSpectrogram(take, item, numFreqBins, numTimeBins, freqLow, freqHigh)
               local spectroTime = reaper.time_precise() - t0
               statusMessage = string.format("Spectrogram computed in %.3fs", spectroTime)
             end
@@ -1257,7 +1398,7 @@ local function loop()
         
         if waveformData.spectrogram then
           local mouse_x, mouse_y = reaper.ImGui_GetMousePos(ctx)
-          local cursorInfo = drawSpectrogram(fg, waveformData.spectrogram, x, y, w, h, minDB, maxDB, freqLow, freqHigh, zoomLevel, zoomCenter, mouse_x, mouse_y)
+          local cursorInfo = drawSpectrogram(fg, waveformData.spectrogram, x, y, w, h, minDB, maxDB, freqLow, freqHigh, zoomLevel, zoomCenter, mouse_x, mouse_y, freqLogScaling)
           
           if cursorInfo and displayMode == "spectrogram" then
             statusMessage = string.format("Freq: %.1f Hz | Amplitude: %.1f dB", cursorInfo.freq, cursorInfo.db)
@@ -1277,27 +1418,27 @@ local function loop()
         local itemEnd = itemStart + itemLength
         
         if cursorPos >= itemStart and cursorPos <= itemEnd then
-        local take = reaper.GetActiveTake(item)
-        if take then
-          local aa, aaStart, aaEnd, _, audioItemLen = get_accessor_bounds(take)
-          if aa then
-            local itemOffset = cursorPos - itemStart
-            local samplePos = math.floor((itemOffset / audioItemLen) * totalSamples) + 1
-            
-            if samplePos >= startSample and samplePos <= startSample + visibleSamples then
-              local xPos = x + ((samplePos - startSample) / visibleSamples) * w
+          local take = reaper.GetActiveTake(item)
+          if take then
+            local aa, aaStart, aaEnd, _, audioItemLen = get_accessor_bounds(take)
+            if aa then
+              local itemOffset = cursorPos - itemStart
+              local samplePos = math.floor((itemOffset / audioItemLen) * totalSamples) + 1
               
-              -- Draw playhead line (bright green)
-              reaper.ImGui_DrawList_AddLine(fg, xPos, y, xPos, y + h, 0x00FF00FF, 2)
-              reaper.ImGui_DrawList_AddLine(fg, xPos, y, xPos, y + h, 0x00FF0044, 4)
+              if samplePos >= startSample and samplePos <= startSample + visibleSamples then
+                local xPos = x + ((samplePos - startSample) / visibleSamples) * w
+                
+                -- Draw playhead line (bright green)
+                reaper.ImGui_DrawList_AddLine(fg, xPos, y, xPos, y + h, 0x00FF00FF, 2)
+                reaper.ImGui_DrawList_AddLine(fg, xPos, y, xPos, y + h, 0x00FF0044, 4)
+              end
             end
           end
         end
-      end
       
-      if displayMode == "waveform" then
-        drawTimeRuler(fg, item, x, y + h, w, rulerH, zoomLevel, zoomCenter, totalSamples, startSample, visibleSamples)
-      end
+        if displayMode == "waveform" then
+          drawTimeRuler(fg, item, x, y + h, w, rulerH, zoomLevel, zoomCenter, totalSamples, startSample, visibleSamples)
+        end
       end
     else
       reaper.ImGui_Text(ctx, "No waveform - select item and click Refresh")
