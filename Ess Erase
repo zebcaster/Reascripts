@@ -266,10 +266,17 @@ local function computeSpectrogram(take, item, numFreqBins, numTimeBins, freqLow,
             local real = fftData[realIdx]
             local imag = fftData[imagIdx]
             if real and imag then
+             
+              --local magnitude = math.sqrt(real * real + imag * imag)
+              --magnitude = (magnitude / fftSize) * 2  -- Normalize and account for negative frequencies
+              --magnitude = magnitude * 10  -- Boost to see more dynamic range
+              --local magnitudeDB = linearTodB(magnitude)
+              
               local magnitude = math.sqrt(real * real + imag * imag)
-              magnitude = (magnitude / fftSize) * 2  -- Normalize and account for negative frequencies
-              magnitude = magnitude * 10  -- Boost to see more dynamic range
+              -- For a real FFT with proper windowing, normalize by half the FFT size
+              magnitude = (magnitude / fftSize) * 10--magnitude / (fftSize / 2)
               local magnitudeDB = linearTodB(magnitude)
+              
               timeSlice[freqIdx] = magnitudeDB
             else
               timeSlice[freqIdx] = -150
@@ -818,11 +825,11 @@ local tabState = {
 }
 
 local sliderWasActive = {}
-local numFreqBins = 128  -- Add to your loadSettings/saveSettings
-local numTimeBins = 256  -- Add to your loadSettings/saveSettings
+local numFreqBins = 256  -- Add to your loadSettings/saveSettings
+local numTimeBins = 512  -- Add to your loadSettings/saveSettings
 local DEFAULT_RAW_WAVEFORM_OPACITY = 30
 local rawWaveformOpacity = DEFAULT_RAW_WAVEFORM_OPACITY
-local freqLogScaling = 7.0
+local freqLogScaling = 4.0
 
 local function getPinnedWaveformRect(plotHeight)
   local winPosX, winPosY = reaper.ImGui_GetWindowPos(ctx)
