@@ -208,6 +208,84 @@ local function detectSibilance(take, item, freqLow, freqHigh, threshold, detecti
   return sibilanceMap, itemLen, windowSize
 end
 
+-- ===== Spectrogram computation (full spectrum) =====
+local function computeSpectrogram(take, item, numFreqBins, numTimeBins, freqLow, freqHigh)
+  local aa, aaStart, aaEnd, samplerate, itemLen = get_accessor_bounds(take)
+  if not aa or samplerate <= 0 or itemLen <= 0 then return nil end
+
+  local itemVolume = reaper.GetMediaItemInfo_Value(item, "D_VOL")
+  local numChannels = getSourceChannelCount(take)
+  
+  local fftSize = 4096
+  local hopSize = math.floor(itemLen / numTimeBins * samplerate)
+  hopSize = math.max(512, math.min(hopSize, samplerate))
+  
+  local spectrogram = {}
+  
+  for timeIdx = 1, numTimeBins do
+    local readTime = aaStart + ((timeIdx - 1) / numTimeBins) * itemLen
+    local numSamples = math.min(hopSize, 100000)
+    
+    if numSamples > 0 then
+      local buf = getAudioBuffer(take, numSamples * numChannels * 2)
+      buf.clear()
+      local read = reaper.GetAudioAccessorSamples(aa, samplerate, numChannels, readTime, numSamples, buf)
+      
+      if read > 0 then
+        local fftData = reaper.new_array(fftSize)
+        fftData.clear()
+        
+        local t = buf.table()
+        for j = 1, math.min(numSamples, fftSize) do
+          local sample = t[(j - 1) * numChannels + 1] * itemVolume
+          fftData[j] = sample
+        end
+        
+        fftData.fft_real(fftSize, true, 1)
+        
+        local timeSlice = {}
+        local nyquist = samplerate / 2
+        
+        -- Map entire spectrum from 0 to Nyquist
+        for freqIdx = 1, numFreqBins do
+          local binIdx = math.floor((freqIdx - 1) / (numFreqBins - 1) * (fftSize / 2 - 1)) + 1
+          binIdx = math.max(1, math.min(binIdx, fftSize / 2))
+          
+          local realIdx = binIdx * 2 - 1
+          local imagIdx = binIdx * 2
+          
+          if realIdx > 0 and realIdx <= fftSize and imagIdx > 0 and imagIdx <= fftSize then
+            local real = fftData[realIdx]
+            local imag = fftData[imagIdx]
+            if real and imag then
+              local magnitude = math.sqrt(real * real + imag * imag)
+              magnitude = (magnitude / fftSize) * 2  -- Normalize and account for negative frequencies
+              magnitude = magnitude * 10  -- Boost to see more dynamic range
+              local magnitudeDB = linearTodB(magnitude)
+              timeSlice[freqIdx] = magnitudeDB
+            else
+              timeSlice[freqIdx] = -150
+            end
+          else
+            timeSlice[freqIdx] = -150
+          end
+        end
+        
+        spectrogram[timeIdx] = timeSlice
+      else
+        local timeSlice = {}
+        for freqIdx = 1, numFreqBins do
+          timeSlice[freqIdx] = -150
+        end
+        spectrogram[timeIdx] = timeSlice
+      end
+    end
+  end
+  
+  releaseAudioAccessor(take)
+  return spectrogram
+end
+
 -- ===== Waveform with sibilance coloring =====
 local function getWaveformWithSibilance(item, numSamples, sibilanceMap, detectionWindowSize, reduction)
   local take = reaper.GetActiveTake(item)
@@ -377,6 +455,174 @@ local function drawWaveform(drawList, rawData, processedData, x, y, width, heigh
   if zoomLevel > 1.01 then
     reaper.ImGui_DrawList_AddText(drawList, x + 5, y + 5, 0xFFFFFFFF, string.format("Zoom: %.1fx", zoomLevel))
   end
+end
+
+-- Spectrogram drawing with logarithmic frequency scaling
+local function drawSpectrogram(drawList, spectrogram, x, y, w, h, minDB, maxDB, freqLow, freqHigh, zoomLevel, zoomCenter, mouseX, mouseY)
+  if not spectrogram or #spectrogram == 0 then return end
+  
+  reaper.ImGui_DrawList_AddRectFilled(drawList, x, y, x + w, y + h, 0x1A1A1AFF)
+  
+  local numTimeBins = #spectrogram
+  local numFreqBins = spectrogram[1] and #spectrogram[1] or 0
+  if numFreqBins == 0 then return end
+  
+  local dbRange = maxDB - minDB
+  if dbRange <= 0 then dbRange = 1 end
+  
+  -- Logarithmic frequency scaling parameters
+  local freqLogScaling = 7.0  -- Adjust this value to control emphasis on lower frequencies
+  local nyquist = 24000  -- Adjust based on your sample rate
+  
+  -- Apply zoom/pan to time dimension
+  local visibleTimeBins = math.max(10, math.floor(numTimeBins / zoomLevel))
+  local startTimeBin = math.max(1, math.min(numTimeBins - visibleTimeBins, math.floor(zoomCenter * numTimeBins - visibleTimeBins / 2)))
+  local endTimeBin = math.min(numTimeBins, startTimeBin + visibleTimeBins)
+  
+  local barWidth = w / visibleTimeBins
+  
+  -- Diagnostic: find actual min/max dB values in spectrogram
+  local actualMinDB = 0
+  local actualMaxDB = -150
+  for timeIdx = 1, numTimeBins do
+    local timeSlice = spectrogram[timeIdx]
+    if timeSlice then
+      for freqIdx = 1, numFreqBins do
+        local db = timeSlice[freqIdx]
+        if db and db > -150 then
+          actualMinDB = math.max(actualMinDB, db)
+          actualMaxDB = math.min(actualMaxDB, db)
+        end
+      end
+    end
+  end
+  
+  -- Debug output (comment out after fixing)
+  debugMsg(string.format("Spectrogram dB range: actual [%.1f, %.1f], display [%.1f, %.1f]\n", 
+    actualMaxDB, actualMinDB, minDB, maxDB))
+  
+  for timeIdx = startTimeBin, endTimeBin do
+    local timeSlice = spectrogram[timeIdx]
+    if timeSlice then
+      local barX = x + (timeIdx - startTimeBin) * barWidth
+      
+      for freqBarIdx = 1, numFreqBins do
+        -- Map display position to logarithmic frequency
+        local normalizedPos = (freqBarIdx - 1) / (numFreqBins - 1)  -- 0 to 1
+        
+        -- Convert linear position to logarithmic frequency position
+        local logPos = (math.exp(normalizedPos * freqLogScaling) - 1) / (math.exp(freqLogScaling) - 1)
+        logPos = math.max(0, math.min(1, logPos))
+        
+        -- Map back to frequency bin index in the spectrogram data
+        local freqIdx = math.floor(logPos * (numFreqBins - 1)) + 1
+        freqIdx = math.max(1, math.min(numFreqBins, freqIdx))
+        
+        local db = timeSlice[freqIdx]
+        if not db or db < minDB then db = minDB end
+        if db > maxDB then db = maxDB end
+        
+        -- Map dB values to colors with smooth gradients
+        local color
+        
+        if db < -82 then
+          -- Gradient: Black (0x000000FF) to Magenta (0xFF00FFFF) (minDB to -82 dB)
+          local t = (db - minDB) / (-82 - minDB)
+          t = math.max(0, math.min(1, t))
+          local r = math.floor(255 * t)
+          local b = math.floor(255 * t)
+          color = (b * 65536) + r + 0xFF
+        elseif db < -64 then
+          -- Gradient: Magenta (0xFF00FFFF) to Red (0xFF0000FF) (-82 to -64 dB)
+          local t = (db - (-82)) / (-64 - (-82))
+          t = math.max(0, math.min(1, t))
+          local r = 255
+          local b = math.floor(255 * (1 - t))
+          color = (b * 65536) + r + 0xFF
+        elseif db < -42 then
+          -- Gradient: Red (0xFF0000FF) to Yellow (0xFFFF00FF) (-64 to -42 dB)
+          local t = (db - (-64)) / (-42 - (-64))
+          t = math.max(0, math.min(1, t))
+          local r = 255
+          local g = math.floor(255 * t)
+          color = (g * 256) + r + 0xFF
+        elseif db < -26 then
+          -- Gradient: Yellow (0xFFFF00FF) to Green (0x00FF00FF) (-42 to -26 dB)
+          local t = (db - (-42)) / (-26 - (-42))
+          t = math.max(0, math.min(1, t))
+          local r = math.floor(255 * (1 - t))
+          local g = 255
+          color = (g * 256) + r + 0xFF
+        elseif db < -16 then
+          -- Gradient: Green (0x00FF00FF) to Cyan (0x00FFFFFF) (-26 to -16 dB)
+          local t = (db - (-26)) / (-16 - (-26))
+          t = math.max(0, math.min(1, t))
+          local g = 255
+          local b = math.floor(255 * t)
+          color = (b * 65536) + (g * 256) + 0xFF
+        elseif db < -6 then
+          -- Gradient: Cyan (0x00FFFFFF) to Blue (0x0000FFFF) (-16 to -6 dB)
+          local t = (db - (-16)) / (-6 - (-16))
+          t = math.max(0, math.min(1, t))
+          local g = math.floor(255 * (1 - t))
+          local b = 255
+          color = (b * 65536) + (g * 256) + 0xFF
+        elseif db < 0 then
+          -- Gradient: Blue (0x0000FFFF) to Violet (0x5700FFFF) (-6 to 0 dB)
+          local t = (db - (-6)) / (0 - (-6))
+          t = math.max(0, math.min(1, t))
+          local r = math.floor(0x57 * t)
+          local b = 255
+          color = (b * 65536) + r + 0xFF
+        else
+          -- Violet (0x5700FFFF): 0+ dB
+          color = 0x5700FFFF
+        end
+        
+        local freqBarHeight = h / numFreqBins
+        local barY = y + (numFreqBins - freqBarIdx) * freqBarHeight
+        
+        reaper.ImGui_DrawList_AddRectFilled(drawList, barX, barY, barX + barWidth + 1, barY + freqBarHeight + 1, color)
+      end
+    end
+  end
+  
+  reaper.ImGui_DrawList_AddRect(drawList, x, y, x + w, y + h, 0x808080FF, 0, 0, 1)
+  
+  -- Show zoom level indicator
+  if zoomLevel > 1.01 then
+    reaper.ImGui_DrawList_AddText(drawList, x + 5, y + 5, 0xFFFFFFFF, string.format("Zoom: %.1fx", zoomLevel))
+  end
+  
+  -- Return cursor information if mouse is over spectrogram
+  local cursorInfo = nil
+  if mouseX and mouseY and mouseX >= x and mouseX <= x + w and mouseY >= y and mouseY <= y + h then
+    -- Calculate which time bin the mouse is over
+    local relX = (mouseX - x) / w
+    local timeIdx = math.floor(relX * visibleTimeBins) + startTimeBin
+    timeIdx = math.max(startTimeBin, math.min(endTimeBin, timeIdx))
+    
+    -- Convert vertical position to logarithmic frequency with sub-pixel precision
+    local freqDisplayPos = 1 - ((mouseY - y) / h)  -- Invert because Y increases downward
+    local logPos = (math.exp(freqDisplayPos * freqLogScaling) - 1) / (math.exp(freqLogScaling) - 1)
+    logPos = math.max(0, math.min(1, logPos))
+    
+    -- Calculate precise frequency without rounding to bin boundary
+    local preciseFreqIdx = logPos * (numFreqBins - 1) + 1
+    local freq = (preciseFreqIdx - 1) / (numFreqBins - 1) * nyquist
+    
+    -- Get the actual bin for dB lookup
+    local freqIdx = math.floor(preciseFreqIdx)
+    freqIdx = math.max(1, math.min(numFreqBins, freqIdx))
+    
+    local timeSlice = spectrogram[timeIdx]
+    if timeSlice and timeSlice[freqIdx] then
+      local db = timeSlice[freqIdx]
+      cursorInfo = { freq = freq, db = db }
+    end
+  end
+  
+  return cursorInfo
 end
 
 -- Time ruler drawing
@@ -550,6 +796,7 @@ local sibilanceMap = nil
 local detectionWindowSize = 0.01
 local itemName = ""
 local lastAnalysisTime = 0
+local displayMode = "waveform"  -- "waveform" or "spectrogram"
 
 local waveformNeedsRedraw = true
 local zoomLevel, zoomCenter = 1.0, 0.5
@@ -596,6 +843,11 @@ local function refreshWaveform()
 
   rawWaveformData = getRawWaveform(item, numBars)
   waveformData = getWaveformWithSibilance(item, numBars, sibilanceMap, detectionWindowSize, reduction)
+  
+  -- Clear cached spectrogram so it will be recomputed
+  if waveformData then
+    waveformData.spectrogram = nil
+  end
   
   lastAnalysisTime = reaper.time_precise() - t0
   statusMessage = string.format("Analysis: %.3fs", lastAnalysisTime)
@@ -825,7 +1077,7 @@ local function loop()
           elseif changed then
             reduction = newVal
           end
-          local isActive = reaper.ImGui_IsItemActive(ctx)
+          isActive = reaper.ImGui_IsItemActive(ctx)
           if sliderWasActive["reduction"] and not isActive then
             refreshWaveform()
           end
@@ -912,32 +1164,16 @@ local function loop()
       local mouse_x, mouse_y = reaper.ImGui_GetMousePos(ctx)
       local isInside = (mouse_x >= x and mouse_x <= x + w and mouse_y >= y and mouse_y <= y + h)
 
-      if isInside and reaper.ImGui_IsMouseClicked(ctx, 0) and not isDragging then
-        local item = reaper.GetSelectedMediaItem(0, 0)
-        if item then
-          local take = reaper.GetActiveTake(item)
-          if take then
-            local aa, aaStart, aaEnd, samplerate, itemLen = get_accessor_bounds(take)
-            if aa then
-              -- Calculate which sample was clicked
-              local relX = (mouse_x - x) / w
-              local samplePos = startSample + relX * visibleSamples
-              local clickTime = (samplePos / totalSamples) * itemLen
-              
-              -- Get item position in project
-              local itemStart = reaper.GetMediaItemInfo_Value(item, "D_POSITION")
-              
-              -- Set edit cursor to the clicked position
-              local cursorPos = itemStart + clickTime
-              reaper.SetEditCurPos(cursorPos, false, false)
-              
-              statusMessage = string.format("Edit cursor set to %.3f", cursorPos)
-            end
-          end
-        end
+      -- Right-click to toggle display mode
+      if isInside and reaper.ImGui_IsMouseClicked(ctx, 1) then
+        displayMode = displayMode == "waveform" and "spectrogram" or "waveform"
+        statusMessage = "Display mode: " .. displayMode
+        waveformNeedsRedraw = true
       end
 
+      -- Left-click to set edit cursor (single click)
       if isInside and reaper.ImGui_IsMouseClicked(ctx, 0) and not isDragging then
+        -- Check if this is a drag start or just a click
         isDragging = true
         dragStartY = mouse_y
         dragStartZoom = zoomLevel
@@ -950,8 +1186,38 @@ local function loop()
 
       if isDragging then
         if reaper.ImGui_IsMouseReleased(ctx, 0) then
+          -- If barely moved, treat as click to set cursor
+          local deltaY = math.abs(dragStartY - mouse_y)
+          if deltaY < 5 then
+            local item = reaper.GetSelectedMediaItem(0, 0)
+            if item then
+              local take = reaper.GetActiveTake(item)
+              if take then
+                local aa, aaStart, aaEnd, samplerate, itemLen = get_accessor_bounds(take)
+                if aa then
+                  -- Calculate which sample was clicked
+                  local relX = (mouse_x - x) / w
+                  local total = #waveformData
+                  local vis = math.max(50, math.floor(total / zoomLevel))
+                  local startSamp = math.max(1, math.min(total - vis, math.floor(zoomCenter * total - vis / 2)))
+                  local samplePos = startSamp + relX * vis
+                  local clickTime = (samplePos / total) * itemLen
+                  
+                  -- Get item position in project
+                  local itemStart = reaper.GetMediaItemInfo_Value(item, "D_POSITION")
+                  
+                  -- Set edit cursor to the clicked position
+                  local cursorPos = itemStart + clickTime
+                  reaper.SetEditCurPos(cursorPos, false, false)
+                  
+                  statusMessage = string.format("Edit cursor set to %.3f", cursorPos)
+                end
+              end
+            end
+          end
           isDragging = false
         else
+          -- Dragging - zoom
           local deltaY = dragStartY - mouse_y
           local zoomFactor = 1 + (deltaY / 100)
           local newZoom = math.max(1.0, math.min(100.0, dragStartZoom * zoomFactor))
@@ -969,12 +1235,70 @@ local function loop()
 
       local fg = reaper.ImGui_GetForegroundDrawList(ctx)
       reaper.ImGui_DrawList_AddRectFilled(fg, x, y, x + w, y + h, 0x1A1A1AFF)
-      drawWaveform(fg, rawWaveformData, waveformData, x, y, w, h, minDB, maxDB, curvePower, zoomLevel, zoomCenter, sibilanceOpacity, rawWaveformOpacity)
+      
+      -- Draw waveform or spectrogram based on mode
+      if displayMode == "waveform" then
+        drawWaveform(fg, rawWaveformData, waveformData, x, y, w, h, minDB, maxDB, curvePower, zoomLevel, zoomCenter, sibilanceOpacity, rawWaveformOpacity)
+      else
+        -- Spectrogram mode - compute if not cached
+        if not waveformData.spectrogram then
+          local item = reaper.GetSelectedMediaItem(0, 0)
+          if item then
+            local take = reaper.GetActiveTake(item)
+            if take then
+              -- Time the spectrogram computation
+              local t0 = reaper.time_precise()
+              waveformData.spectrogram = computeSpectrogram(take, item, 128, 256, freqLow, freqHigh)
+              local spectroTime = reaper.time_precise() - t0
+              statusMessage = string.format("Spectrogram computed in %.3fs", spectroTime)
+            end
+          end
+        end
+        
+        if waveformData.spectrogram then
+          local mouse_x, mouse_y = reaper.ImGui_GetMousePos(ctx)
+          local cursorInfo = drawSpectrogram(fg, waveformData.spectrogram, x, y, w, h, minDB, maxDB, freqLow, freqHigh, zoomLevel, zoomCenter, mouse_x, mouse_y)
+          
+          if cursorInfo and displayMode == "spectrogram" then
+            statusMessage = string.format("Freq: %.1f Hz | Amplitude: %.1f dB", cursorInfo.freq, cursorInfo.db)
+          end
+        end
+      end
+      
       reaper.ImGui_DrawList_AddRect(fg, x, y, x + w, y + h, 0x808080FF, 0, 0, 1)
-
       local item = reaper.GetSelectedMediaItem(0, 0)
-      drawPlayhead(fg, item, x, y, w, h, zoomLevel, zoomCenter, totalSamples, startSample, visibleSamples)
-      drawTimeRuler(fg, item, x, y + h, w, rulerH, zoomLevel, zoomCenter, totalSamples, startSample, visibleSamples)
+      
+      -- Draw playhead for both modes
+      if item then
+        local isPlaying = reaper.GetPlayState() & 1 == 1
+        local cursorPos = isPlaying and reaper.GetPlayPosition() or reaper.GetCursorPosition()
+        local itemStart = reaper.GetMediaItemInfo_Value(item, "D_POSITION")
+        local itemLength = reaper.GetMediaItemInfo_Value(item, "D_LENGTH")
+        local itemEnd = itemStart + itemLength
+        
+        if cursorPos >= itemStart and cursorPos <= itemEnd then
+        local take = reaper.GetActiveTake(item)
+        if take then
+          local aa, aaStart, aaEnd, _, audioItemLen = get_accessor_bounds(take)
+          if aa then
+            local itemOffset = cursorPos - itemStart
+            local samplePos = math.floor((itemOffset / audioItemLen) * totalSamples) + 1
+            
+            if samplePos >= startSample and samplePos <= startSample + visibleSamples then
+              local xPos = x + ((samplePos - startSample) / visibleSamples) * w
+              
+              -- Draw playhead line (bright green)
+              reaper.ImGui_DrawList_AddLine(fg, xPos, y, xPos, y + h, 0x00FF00FF, 2)
+              reaper.ImGui_DrawList_AddLine(fg, xPos, y, xPos, y + h, 0x00FF0044, 4)
+            end
+          end
+        end
+      end
+      
+      if displayMode == "waveform" then
+        drawTimeRuler(fg, item, x, y + h, w, rulerH, zoomLevel, zoomCenter, totalSamples, startSample, visibleSamples)
+      end
+      end
     else
       reaper.ImGui_Text(ctx, "No waveform - select item and click Refresh")
     end
