@@ -25,6 +25,8 @@ local DEFAULT_DETECTION_MS = 10
 local DEFAULT_ENVELOPE_MS = 1
 local DEFAULT_SIBILANCE_OPACITY = 60
 local DEFAULT_FREQ_LOG_SCALING = 4.0
+local DEFAULT_FREQ_PRECISION = 256
+local DEFAULT_TIME_PRECISION = 512
 
 -- Debug toggle
 local showDebug = false
@@ -58,8 +60,8 @@ local function loadSettings()
   local sibilanceOpacity = getExtState("sibilanceOpacity", DEFAULT_SIBILANCE_OPACITY)
   local showTooltips = getExtState("showTooltips", 1) == 1
   local rawWaveformOpacity = getExtState("rawWaveformOpacity", DEFAULT_RAW_WAVEFORM_OPACITY)
-  local numFreqBins = getExtState("numFreqBins", 256)
-  local numTimeBins = getExtState("numTimeBins", 512)
+  local numFreqBins = getExtState("numFreqBins", DEFAULT_FREQ_PRECISION)
+  local numTimeBins = getExtState("numTimeBins", DEFAULT_TIME_PRECISION)
   local freqLogScaling = getExtState("freqLogScaling", DEFAULT_FREQ_LOG_SCALING)
   
   return freqLow, freqHigh, threshold, reduction, attackTime, releaseTime, numBars, minDB, maxDB, curvePower, detectionMs, envelopeMs, sibilanceOpacity, showTooltips, rawWaveformOpacity, numFreqBins, numTimeBins, freqLogScaling
@@ -1019,8 +1021,8 @@ local function loop()
           envelopeMs = DEFAULT_ENVELOPE_MS
           sibilanceOpacity = DEFAULT_SIBILANCE_OPACITY
           rawWaveformOpacity = DEFAULT_RAW_WAVEFORM_OPACITY
-          numFreqBins = 128
-          numTimeBins = 256
+          numFreqBins = DEFAULT_FREQ_PRECISION
+          numTimeBins = DEFAULT_TIME_PRECISION
           statusMessage = "Settings reset to defaults"
           refreshWaveform()
         end
@@ -1233,7 +1235,7 @@ local function loop()
       
                 changed, newVal = reaper.ImGui_SliderInt(ctx, "##numFreqBins", numFreqBins, 64, 512)
                 if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_IsMouseClicked(ctx, 1) then
-                  numFreqBins = 128
+                  numFreqBins = DEFAULT_FREQ_PRECISION
                   statusMessage = "Freq Precision reset"
                   waveformNeedsRedraw = true
                 elseif changed then
@@ -1267,7 +1269,7 @@ local function loop()
       
                 changed2, newVal2 = reaper.ImGui_SliderInt(ctx, "##numTimeBins", numTimeBins, 64, 512)
                 if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_IsMouseClicked(ctx, 1) then
-                  numTimeBins = 256
+                  numTimeBins = DEFAULT_TIME_PRECISION
                   statusMessage = "Time Precision reset"
                   waveformNeedsRedraw = true
                 elseif changed2 then
@@ -1280,7 +1282,7 @@ local function loop()
                 
                 changed2, newVal2 = reaper.ImGui_SliderDouble(ctx, "##freqLogScaling", freqLogScaling, 1.0, 15.0, "%.1f")
                 if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_IsMouseClicked(ctx, 1) then
-                  freqLogScaling = 7.0
+                  freqLogScaling = DEFAULT_FREQ_LOG_SCALING
                   statusMessage = "Freq Log Scaling reset"
                   waveformNeedsRedraw = true
                 elseif changed2 then
