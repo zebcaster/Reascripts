@@ -1,4 +1,4 @@
-a-- @description De-Esser
+-- @description De-Esser
 -- @author ChimRichalds
 -- @version 1.0
 
@@ -24,7 +24,7 @@ local DEFAULT_CURVE_POWER = 14.0
 local DEFAULT_DETECTION_MS = 10
 local DEFAULT_ENVELOPE_MS = 1
 local DEFAULT_SIBILANCE_OPACITY = 60
-local DEFAULT_FREQ_LOG_SCALING = 7.0
+local DEFAULT_FREQ_LOG_SCALING = 4.0
 
 -- Debug toggle
 local showDebug = false
@@ -58,8 +58,8 @@ local function loadSettings()
   local sibilanceOpacity = getExtState("sibilanceOpacity", DEFAULT_SIBILANCE_OPACITY)
   local showTooltips = getExtState("showTooltips", 1) == 1
   local rawWaveformOpacity = getExtState("rawWaveformOpacity", DEFAULT_RAW_WAVEFORM_OPACITY)
-  local numFreqBins = getExtState("numFreqBins", 128)
-  local numTimeBins = getExtState("numTimeBins", 256)
+  local numFreqBins = getExtState("numFreqBins", 256)
+  local numTimeBins = getExtState("numTimeBins", 512)
   local freqLogScaling = getExtState("freqLogScaling", DEFAULT_FREQ_LOG_SCALING)
   
   return freqLow, freqHigh, threshold, reduction, attackTime, releaseTime, numBars, minDB, maxDB, curvePower, detectionMs, envelopeMs, sibilanceOpacity, showTooltips, rawWaveformOpacity, numFreqBins, numTimeBins, freqLogScaling
