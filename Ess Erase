@@ -276,7 +276,7 @@ local function computeSpectrogram(take, item, numFreqBins, numTimeBins, freqLow,
               
               local magnitude = math.sqrt(real * real + imag * imag)
               -- For a real FFT with proper windowing, normalize by half the FFT size
-              magnitude = (magnitude / fftSize) * 10--magnitude / (fftSize / 2)
+              magnitude = (magnitude / fftSize)-- * 10--magnitude / (fftSize / 2)
               local magnitudeDB = linearTodB(magnitude)
               
               timeSlice[freqIdx] = magnitudeDB
@@ -474,6 +474,16 @@ local function drawWaveform(drawList, rawData, processedData, x, y, width, heigh
   end
 end
 
+-- Helper function to convert a color value to hex string for display
+local function colorToHexString(color)
+  local a = (color >> 24) & 0xFF
+  local b = (color >> 16) & 0xFF
+  local g = (color >> 8) & 0xFF
+  local r = color & 0xFF
+  
+  return string.format("0x%08X", color)
+end
+
 -- Spectrogram drawing with logarithmic frequency scaling
 local function drawSpectrogram(drawList, spectrogram, x, y, w, h, minDB, maxDB, freqLow, freqHigh, zoomLevel, zoomCenter, mouseX, mouseY, freqLogScaling)
   if not spectrogram or #spectrogram == 0 then return end
@@ -487,8 +497,6 @@ local function drawSpectrogram(drawList, spectrogram, x, y, w, h, minDB, maxDB, 
   local dbRange = maxDB - minDB
   if dbRange <= 0 then dbRange = 1 end
   
-  -- Logarithmic frequency scaling parameters
-  --local freqLogScaling = 7.0  -- Adjust this value to control emphasis on lower frequencies
   local nyquist = 24000  -- Adjust based on your sample rate
   
   -- Apply zoom/pan to time dimension
@@ -514,10 +522,10 @@ local function drawSpectrogram(drawList, spectrogram, x, y, w, h, minDB, maxDB, 
     end
   end
   
-  -- Debug output (comment out after fixing)
   debugMsg(string.format("Spectrogram dB range: actual [%.1f, %.1f], display [%.1f, %.1f]\n", 
     actualMaxDB, actualMinDB, minDB, maxDB))
   
+  -- Draw spectrogram
   for timeIdx = startTimeBin, endTimeBin do
     local timeSlice = spectrogram[timeIdx]
     if timeSlice then
@@ -539,61 +547,45 @@ local function drawSpectrogram(drawList, spectrogram, x, y, w, h, minDB, maxDB, 
         if not db or db < minDB then db = minDB end
         if db > maxDB then db = maxDB end
         
-        -- Map dB values to colors with smooth gradients
+        -- Calculate color based on dB value (RGBA format)
         local color
-        
-        if db < -82 then
-          -- Gradient: Black (0x000000FF) to Magenta (0xFF00FFFF) (minDB to -82 dB)
-          local t = (db - minDB) / (-82 - minDB)
+        if db < -84 then
+          local t = (db - minDB) / (-84 - minDB)
+          t = math.max(0, math.min(1, t))
+          local b = math.floor(255 * t)
+          color = (0 << 24) + (0 << 16) + (b << 8) + 0x50
+        elseif db < -72 then
+          local t = (db - (-84)) / (-72 - (-84))
           t = math.max(0, math.min(1, t))
           local r = math.floor(255 * t)
-          local b = math.floor(255 * t)
-          color = (b * 65536) + r + 0xFF
-        elseif db < -64 then
-          -- Gradient: Magenta (0xFF00FFFF) to Red (0xFF0000FF) (-82 to -64 dB)
-          local t = (db - (-82)) / (-64 - (-82))
+          local b = 255
+          color = (r << 24) + (0 << 16) + (b << 8) + 0xB4
+        elseif db < -60 then
+          local t = (db - (-72)) / (-60 - (-72))
           t = math.max(0, math.min(1, t))
           local r = 255
           local b = math.floor(255 * (1 - t))
-          color = (b * 65536) + r + 0xFF
-        elseif db < -42 then
-          -- Gradient: Red (0xFF0000FF) to Yellow (0xFFFF00FF) (-64 to -42 dB)
-          local t = (db - (-64)) / (-42 - (-64))
+          color = (r << 24) + (0 << 16) + (b << 8) + 0xB4
+        elseif db < -48 then
+          local t = (db - (-60)) / (-48 - (-60))
           t = math.max(0, math.min(1, t))
           local r = 255
           local g = math.floor(255 * t)
-          color = (g * 256) + r + 0xFF
-        elseif db < -26 then
-          -- Gradient: Yellow (0xFFFF00FF) to Green (0x00FF00FF) (-42 to -26 dB)
-          local t = (db - (-42)) / (-26 - (-42))
+          color = (r << 24) + (g << 16) + (0 << 8) + 0xF0
+        elseif db < -36 then
+          local t = (db - (-48)) / (-36 - (-48))
           t = math.max(0, math.min(1, t))
           local r = math.floor(255 * (1 - t))
           local g = 255
-          color = (g * 256) + r + 0xFF
-        elseif db < -16 then
-          -- Gradient: Green (0x00FF00FF) to Cyan (0x00FFFFFF) (-26 to -16 dB)
-          local t = (db - (-26)) / (-16 - (-26))
+          color = (r << 24) + (g << 16) + (0 << 8) + 0xFF
+        elseif db < -24 then
+          local t = (db - (-36)) / (-24 - (-36))
           t = math.max(0, math.min(1, t))
           local g = 255
           local b = math.floor(255 * t)
-          color = (b * 65536) + (g * 256) + 0xFF
-        elseif db < -6 then
-          -- Gradient: Cyan (0x00FFFFFF) to Blue (0x0000FFFF) (-16 to -6 dB)
-          local t = (db - (-16)) / (-6 - (-16))
-          t = math.max(0, math.min(1, t))
-          local g = math.floor(255 * (1 - t))
-          local b = 255
-          color = (b * 65536) + (g * 256) + 0xFF
-        elseif db < 0 then
-          -- Gradient: Blue (0x0000FFFF) to Violet (0x5700FFFF) (-6 to 0 dB)
-          local t = (db - (-6)) / (0 - (-6))
-          t = math.max(0, math.min(1, t))
-          local r = math.floor(0x57 * t)
-          local b = 255
-          color = (b * 65536) + r + 0xFF
+          color = (0 << 24) + (g << 16) + (b << 8) + 0xFF
         else
-          -- Violet (0x5700FFFF): 0+ dB
-          color = 0x5700FFFF
+          color = (0 << 24) + (255 << 16) + (255 << 8) + 0xFF
         end
         
         local freqBarHeight = h / numFreqBins
@@ -635,7 +627,49 @@ local function drawSpectrogram(drawList, spectrogram, x, y, w, h, minDB, maxDB, 
     local timeSlice = spectrogram[timeIdx]
     if timeSlice and timeSlice[freqIdx] then
       local db = timeSlice[freqIdx]
-      cursorInfo = { freq = freq, db = db }
+      
+      -- Calculate color using the same logic as the drawing loop (RGBA format)
+      local color
+      if db < -84 then
+        local t = (db - minDB) / (-84 - minDB)
+        t = math.max(0, math.min(1, t))
+        local b = math.floor(255 * t)
+        color = (0 << 24) + (0 << 16) + (b << 8) + 0x50
+      elseif db < -72 then
+        local t = (db - (-84)) / (-72 - (-84))
+        t = math.max(0, math.min(1, t))
+        local r = math.floor(255 * t)
+        local b = 255
+        color = (r << 24) + (0 << 16) + (b << 8) + 0xB4
+      elseif db < -60 then
+        local t = (db - (-72)) / (-60 - (-72))
+        t = math.max(0, math.min(1, t))
+        local r = 255
+        local b = math.floor(255 * (1 - t))
+        color = (r << 24) + (0 << 16) + (b << 8) + 0xB4
+      elseif db < -48 then
+        local t = (db - (-60)) / (-48 - (-60))
+        t = math.max(0, math.min(1, t))
+        local r = 255
+        local g = math.floor(255 * t)
+        color = (r << 24) + (g << 16) + (0 << 8) + 0xF0
+      elseif db < -36 then
+        local t = (db - (-48)) / (-36 - (-48))
+        t = math.max(0, math.min(1, t))
+        local r = math.floor(255 * (1 - t))
+        local g = 255
+        color = (r << 24) + (g << 16) + (0 << 8) + 0xFF
+      elseif db < -24 then
+        local t = (db - (-36)) / (-24 - (-36))
+        t = math.max(0, math.min(1, t))
+        local g = 255
+        local b = math.floor(255 * t)
+        color = (0 << 24) + (g << 16) + (b << 8) + 0xFF
+      else
+        color = (0 << 24) + (255 << 16) + (255 << 8) + 0xFF
+      end
+      
+      cursorInfo = { freq = freq, db = db, color = color }
     end
   end
   
