@@ -14,7 +14,7 @@ local SCRIPT_NAME = "De-Esser"
 local DEFAULT_FREQ_LOW = 4000
 local DEFAULT_FREQ_HIGH = 14000
 local DEFAULT_THRESHOLD_RATIO = 0.40
-local DEFAULT_REDUCTION = -6
+local DEFAULT_MAX_REDUCTION = -6
 local DEFAULT_ATTACK_TIME = 0.01
 local DEFAULT_RELEASE_TIME = 0.1
 local DEFAULT_NUM_BARS = 10000
@@ -23,10 +23,11 @@ local DEFAULT_MAX_DB = -11
 local DEFAULT_CURVE_POWER = 14.0
 local DEFAULT_DETECTION_MS = 10
 local DEFAULT_ENVELOPE_MS = 1
-local DEFAULT_SIBILANCE_OPACITY = 60
+local DEFAULT_SIBILANCE_OPACITY = 0
 local DEFAULT_FREQ_LOG_SCALING = 4.0
 local DEFAULT_FREQ_PRECISION = 256
 local DEFAULT_TIME_PRECISION = 512
+local DEFAULT_RAW_WAVEFORM_OPACITY = 62
 
 -- Debug toggle
 local showDebug = false
@@ -48,7 +49,7 @@ local function loadSettings()
   local freqLow = getExtState("freqLow", DEFAULT_FREQ_LOW)
   local freqHigh = getExtState("freqHigh", DEFAULT_FREQ_HIGH)
   local thresholdRatio = getExtState("thresholdRatio", DEFAULT_THRESHOLD_RATIO)
-  local reduction = getExtState("reduction", DEFAULT_REDUCTION)
+  local maxReduction = getExtState("maxReduction", DEFAULT_MAX_REDUCTION)  -- NEW
   local attackTime = getExtState("attackTime", DEFAULT_ATTACK_TIME)
   local releaseTime = getExtState("releaseTime", DEFAULT_RELEASE_TIME)
   local numBars = getExtState("numBars", DEFAULT_NUM_BARS)
@@ -64,14 +65,15 @@ local function loadSettings()
   local numTimeBins = getExtState("numTimeBins", DEFAULT_TIME_PRECISION)
   local freqLogScaling = getExtState("freqLogScaling", DEFAULT_FREQ_LOG_SCALING)
   
-  return freqLow, freqHigh, thresholdRatio, reduction, attackTime, releaseTime, numBars, minDB, maxDB, curvePower, detectionMs, envelopeMs, sibilanceOpacity, showTooltips, rawWaveformOpacity, numFreqBins, numTimeBins, freqLogScaling
+  return freqLow, freqHigh, thresholdRatio, maxReduction, attackTime, releaseTime, numBars, minDB, maxDB, curvePower, detectionMs, envelopeMs, sibilanceOpacity, showTooltips, rawWaveformOpacity, numFreqBins, numTimeBins, freqLogScaling
 end
 
-local function saveSettings(freqLow, freqHigh, thresholdRatio, reduction, attackTime, releaseTime, detectionMs, envelopeMs, sibilanceOpacity, showTooltips, rawWaveformOpacity, numFreqBins, numTimeBins, freqLogScaling)
+-- Update saveSettings() to include maxReduction:
+local function saveSettings(freqLow, freqHigh, thresholdRatio, maxReduction, attackTime, releaseTime, detectionMs, envelopeMs, sibilanceOpacity, showTooltips, rawWaveformOpacity, numFreqBins, numTimeBins, freqLogScaling)
   setExtState("freqLow", freqLow)
   setExtState("freqHigh", freqHigh)
   setExtState("thresholdRatio", thresholdRatio)
-  setExtState("reduction", reduction)
+  setExtState("maxReduction", maxReduction)  -- NEW
   setExtState("attackTime", attackTime)
   setExtState("releaseTime", releaseTime)
   setExtState("detectionMs", detectionMs)
@@ -148,24 +150,33 @@ local function getItemRMS(take, item)
   local numChannels = getSourceChannelCount(take)
   local totalEnergy = 0
   local totalSamples = 0
-  local chunkSize = math.min(100000, samplerate)
-  local numChunks = math.ceil(itemLen * samplerate / chunkSize)
   
-  for chunkIdx = 0, numChunks - 1 do
-    local readTime = aaStart + (chunkIdx * chunkSize / samplerate)
-    local buf = getAudioBuffer(take, chunkSize * numChannels * 2)
-    buf.clear()
-    local read = reaper.GetAudioAccessorSamples(aa, samplerate, numChannels, readTime, chunkSize, buf)
-
-    if read > 0 then
-      local t = buf.table()
-      for j = 1, read, numChannels * 2 do
-        local sample = t[j] * itemVolume
-        totalEnergy = totalEnergy + (sample * sample)
-        totalSamples = totalSamples + 1
+  -- Use detection windows like sibilance detection does (faster sampling)
+  local windowSize = 0.01  -- 10ms windows, same as detection
+  local numWindows = math.ceil(itemLen / windowSize)
+  local hopSize = math.floor(samplerate * windowSize)
+  
+  for windowIdx = 0, numWindows - 1 do
+    local readTime = aaStart + (windowIdx * windowSize)
+    local numSamps = math.min(hopSize, 100000)
+    
+    if numSamps > 0 then
+      local buf = getAudioBuffer(take, numSamps * numChannels * 2)
+      buf.clear()
+      local read = reaper.GetAudioAccessorSamples(aa, samplerate, numChannels, readTime, numSamps, buf)
+      
+      if read > 0 then
+        local t = buf.table()
+        for j = 1, read, numChannels * 2 do
+          local sample = t[j] * itemVolume
+          totalEnergy = totalEnergy + (sample * sample)
+          totalSamples = totalSamples + 1
+        end
       end
     end
   end
+  
+  releaseAudioAccessor(take)
   
   if totalSamples > 0 then
     return linearTodB(math.sqrt(totalEnergy / totalSamples))
@@ -174,21 +185,21 @@ local function getItemRMS(take, item)
 end
 
 -- ===== Real FFT-based sibilance detection =====
-local function detectSibilance(take, item, freqLow, freqHigh, thresholdRatio, detectionMs)
+local function detectSibilanceWithReduction(take, item, freqLow, freqHigh, thresholdRatio, maxReduction, detectionMs)
   local aa, aaStart, aaEnd, samplerate, itemLen = get_accessor_bounds(take)
   if not aa or samplerate <= 0 or itemLen <= 0 then return nil end
 
   local itemVolume = reaper.GetMediaItemInfo_Value(item, "D_VOL")
   local numChannels = getSourceChannelCount(take)
   
-  local windowSize = math.max(0.01, (detectionMs or 10) / 1000)
+  --local windowSize = math.max(0.01, (detectionMs or 10) / 1000)
+  local windowSize = detectionMs / 1000
   local numWindows = math.ceil(itemLen / windowSize)
   
   local hopSize = math.floor(samplerate * windowSize)
   local fftSize = 2048
   local sibilanceMap = {}
   
-  -- Will accumulate RMS during the main loop
   local totalEnergy = 0
   local totalSamples = 0
   
@@ -245,12 +256,28 @@ local function detectSibilance(take, item, freqLow, freqHigh, thresholdRatio, de
         energy = math.sqrt(energy / binCount) / fftSize
         local energyDB = linearTodB(energy)
         
-        -- Calculate actual threshold using ratio: RMS / ratio = threshold
+        -- Calculate threshold using ratio: RMS / ratio = threshold
         local actualThreshold = cachedItemRMS_dB / thresholdRatio
         local isSibilant = (energyDB > actualThreshold)
-        sibilanceMap[i + 1] = {energy=energy, isSibilant=isSibilant, energyDB=energyDB}
+        
+        -- Calculate required reduction to bring sibilant down to threshold
+        local requiredReduction = 0
+        if isSibilant then
+          -- How much do we need to reduce to hit the threshold?
+          requiredReduction = energyDB - actualThreshold
+          -- Cap it at maxReduction (maxReduction is negative, e.g., -12)
+          requiredReduction = math.min(requiredReduction, -maxReduction)
+          requiredReduction = -requiredReduction  -- Make it negative for dB reduction
+        end
+        
+        sibilanceMap[i + 1] = {
+          energy = energy,
+          isSibilant = isSibilant,
+          energyDB = energyDB,
+          requiredReduction = requiredReduction  -- NEW: reduction needed for this window
+        }
       else
-        sibilanceMap[i + 1] = {energy=0, isSibilant=false, energyDB=-150}
+        sibilanceMap[i + 1] = {energy=0, isSibilant=false, energyDB=-150, requiredReduction=0}
       end
     end
   end
@@ -351,7 +378,7 @@ local function computeSpectrogram(take, item, numFreqBins, numTimeBins, freqLow,
 end
 
 -- ===== Waveform with sibilance coloring =====
-local function getWaveformWithSibilance(item, numSamples, sibilanceMap, detectionWindowSize, reduction)
+local function getWaveformWithSibilance(item, numSamples, sibilanceMap, detectionWindowSize, maxReduction)
   local take = reaper.GetActiveTake(item)
   if not take or reaper.TakeIsMIDI(take) then return nil, nil end
   local itemVolume = reaper.GetMediaItemInfo_Value(item, "D_VOL")
@@ -362,8 +389,7 @@ local function getWaveformWithSibilance(item, numSamples, sibilanceMap, detectio
   local numChannels = getSourceChannelCount(take)
   local data = {}
   local waveformWindowSize = itemLen / numSamples
-  local reductionLin = dBToLinear(reduction)
-
+  
   for i = 0, numSamples - 1 do
     local readTime = aaStart + (i * waveformWindowSize)
     local numSamps = math.min(math.floor(samplerate * waveformWindowSize), 1000000)
@@ -372,8 +398,11 @@ local function getWaveformWithSibilance(item, numSamples, sibilanceMap, detectio
     local itemTime = (readTime - aaStart)
     local sibWindow = math.floor(itemTime / detectionWindowSize) + 1
     local isSibilant = false
+    local reductionToapply = 0
+    
     if sibilanceMap and sibWindow >= 1 and sibWindow <= #sibilanceMap then
       isSibilant = sibilanceMap[sibWindow].isSibilant
+      reductionToapply = sibilanceMap[sibWindow].requiredReduction
     end
     
     if numSamps <= 0 then
@@ -384,6 +413,8 @@ local function getWaveformWithSibilance(item, numSamples, sibilanceMap, detectio
       local read = reaper.GetAudioAccessorSamples(aa, samplerate, numChannels, readTime, numSamps, buf)
       if read > 0 then
         local pos, neg, t = 0, 0, buf.table()
+        local reductionLin = dBToLinear(reductionToapply)
+        
         for j = 1, #t, numChannels * 2 do
           local s = t[j] * itemVolume
           -- Apply reduction if sibilant
@@ -494,11 +525,11 @@ local function drawWaveform(drawList, rawData, processedData, x, y, width, heigh
       local negH = dbToHeight(negDB, height / 2)
       
       -- Choose color based on sibilance
-      local waveColor = 0x4080FFFF  -- Normal blue
+      local waveColor = 0x4080FF00  -- Normal blue
       if processedData[i].isSibilant then
         -- Sibilant: orange with opacity control
         local sibOpacityHex = math.floor(sibilanceOpacity * 2.55)
-        waveColor = 0xFFA500FF - ((255 - sibOpacityHex) * 256)
+        waveColor = 0x64FF00FF - ((255 - sibOpacityHex) * 256) --0xFFA500FF
       end
       
       if posH > 0 then reaper.ImGui_DrawList_AddRectFilled(drawList, barX, centerY - posH, barX + barWidth + 1, centerY, waveColor) end
@@ -839,7 +870,7 @@ local function simplifyEnvelope(env)
 end
 
 -- Apply de-esser to item
-local function applyToItem(item, sibilanceMap, detectionWindowSize, reduction, envelopeMs)
+local function applyToItem(item, sibilanceMap, detectionWindowSize, maxReduction, envelopeMs)
   local ts = reaper.time_precise()
   local take = reaper.GetActiveTake(item)
   if not take or reaper.TakeIsMIDI(take) then return false, 0 end
@@ -856,24 +887,87 @@ local function applyToItem(item, sibilanceMap, detectionWindowSize, reduction, e
 
   reaper.DeleteEnvelopePointRange(env, -1, itemLen + 1000)
 
-  local envelopeResolutionSec = math.max(0.0001, (envelopeMs or 1) / 1000)
-  local reductionLin = dBToLinear(reduction)
+  -- Parse sibilanceMap to identify contiguous sibilant regions
+  local regions = {}  -- {startTime, endTime, avgReduction}
+  local inRegion = false
+  local regionStartTime = 0
+  local regionEnergies = {}
   
-  local numPoints = math.ceil(itemLen / envelopeResolutionSec)
-
-  for i = 0, numPoints do
-    local tRel = math.min(i * envelopeResolutionSec, itemLen)
+  for windowIdx = 1, #sibilanceMap do
+    local window = sibilanceMap[windowIdx]
+    local windowStartTime = (windowIdx - 1) * detectionWindowSize
+    local windowEndTime = windowStartTime + detectionWindowSize
     
-    -- Determine reduction at this time point
-    local sibWindow = math.floor(tRel / detectionWindowSize) + 1
-    local isSibilant = false
-    if sibilanceMap and sibWindow >= 1 and sibWindow <= #sibilanceMap then
-      isSibilant = sibilanceMap[sibWindow].isSibilant
+    if window.isSibilant then
+      if not inRegion then
+        -- Start a new region
+        inRegion = true
+        regionStartTime = windowStartTime
+        regionEnergies = {}
+      end
+      -- Accumulate energy/reduction info for this region
+      table.insert(regionEnergies, window.requiredReduction)
+    else
+      if inRegion then
+        -- End the current region, calculate average reduction
+        local avgReduction = 0
+        for _, reduction in ipairs(regionEnergies) do
+          avgReduction = avgReduction + reduction
+        end
+        avgReduction = avgReduction / #regionEnergies
+        
+        table.insert(regions, {
+          startTime = regionStartTime,
+          endTime = windowStartTime,  -- End at the start of the non-sibilant window
+          avgReduction = avgReduction
+        })
+        inRegion = false
+      end
+    end
+  end
+  
+  -- Handle case where item ends while still in a sibilant region
+  if inRegion then
+    local avgReduction = 0
+    for _, reduction in ipairs(regionEnergies) do
+      avgReduction = avgReduction + reduction
+    end
+    avgReduction = avgReduction / #regionEnergies
+    
+    table.insert(regions, {
+      startTime = regionStartTime,
+      endTime = itemLen,
+      avgReduction = avgReduction
+    })
+  end
+
+  -- Create envelope points: one point before each region, one inside (reduced), one after
+  -- Start with full volume across the whole item
+  reaper.InsertEnvelopePoint(env, 0, reaper.ScaleToEnvelopeMode(1, 1.0, env), 0, 0, false, true)
+  reaper.InsertEnvelopePoint(env, itemLen, reaper.ScaleToEnvelopeMode(1, 1.0, env), 0, 0, false, true)
+  
+  for _, region in ipairs(regions) do
+    -- Add a point just before the region starts (full volume)
+    if region.startTime > 0 then
+      reaper.InsertEnvelopePoint(env, region.startTime - 0.001, reaper.ScaleToEnvelopeMode(1, 1.0, env), 0, 0, false, true)
     end
     
-    local reduction_value = isSibilant and reductionLin or 1.0
-    local scaled = reaper.ScaleToEnvelopeMode(1, reduction_value, env)
-    reaper.InsertEnvelopePoint(env, tRel, scaled, 0, 0, false, true)
+    -- Add a point at the start of the region (reduced volume)
+    local reductionLin = dBToLinear(region.avgReduction)
+    local scaled = reaper.ScaleToEnvelopeMode(1, reductionLin, env)
+    reaper.InsertEnvelopePoint(env, region.startTime, scaled, 0, 0, false, true)
+    
+    -- Add a point in the middle of the region (stay reduced)
+    local midTime = (region.startTime + region.endTime) / 2
+    reaper.InsertEnvelopePoint(env, midTime, scaled, 0, 0, false, true)
+    
+    -- Add a point at the end of the region (stay reduced until the very end)
+    reaper.InsertEnvelopePoint(env, region.endTime, scaled, 0, 0, false, true)
+    
+    -- Add a point just after the region ends (back to full volume)
+    if region.endTime < itemLen then
+      reaper.InsertEnvelopePoint(env, region.endTime + 0.001, reaper.ScaleToEnvelopeMode(1, 1.0, env), 0, 0, false, true)
+    end
   end
 
   releaseAudioAccessor(take)
@@ -885,7 +979,7 @@ end
 -- ===== GUI State =====
 local ctx = reaper.ImGui_CreateContext('De-Esser')
 
-local freqLow, freqHigh, thresholdRatio, reduction, attackTime, releaseTime, numBars, minDB, maxDB, curvePower, detectionMs, envelopeMs, sibilanceOpacity, showTooltips = loadSettings()
+local freqLow, freqHigh, thresholdRatio, maxReduction, attackTime, releaseTime, numBars, minDB, maxDB, curvePower, detectionMs, envelopeMs, sibilanceOpacity, showTooltips = loadSettings()
 
 local statusMessage = "Ready"
 local waveformData = nil
@@ -910,7 +1004,7 @@ local tabState = {
 local sliderWasActive = {}
 local numFreqBins = 256  -- Add to your loadSettings/saveSettings
 local numTimeBins = 512  -- Add to your loadSettings/saveSettings
-local DEFAULT_RAW_WAVEFORM_OPACITY = 30
+--local DEFAULT_RAW_WAVEFORM_OPACITY = 30
 local rawWaveformOpacity = DEFAULT_RAW_WAVEFORM_OPACITY
 local freqLogScaling = 4.0
 
@@ -944,13 +1038,15 @@ local function refreshWaveform()
   
   if take then itemName = reaper.GetTakeName(take) end
 
-  detectionWindowSize = math.max(0.01, (detectionMs or 10) / 1000)
-  sibilanceMap, _ , _ = detectSibilance(take, item, freqLow, freqHigh, thresholdRatio, detectionMs)
+  --detectionWindowSize = math.max(0.01, (detectionMs or 10) / 1000)
+  detectionWindowSize = detectionMs / 1000
+  -- NEW: Pass maxReduction instead of reduction
+  sibilanceMap = detectSibilanceWithReduction(take, item, freqLow, freqHigh, thresholdRatio, maxReduction, detectionMs)
 
   rawWaveformData = getRawWaveform(item, numBars)
-  waveformData = getWaveformWithSibilance(item, numBars, sibilanceMap, detectionWindowSize, reduction)
+  -- NEW: Pass maxReduction instead of reduction
+  waveformData = getWaveformWithSibilance(item, numBars, sibilanceMap, detectionWindowSize, maxReduction)
   
-  -- Clear cached spectrogram so it will be recomputed
   if waveformData then
     waveformData.spectrogram = nil
   end
@@ -963,7 +1059,7 @@ end
 
 local function handleHotkeys()
   if reaper.ImGui_IsKeyPressed(ctx, reaper.ImGui_Key_Enter()) then
-    saveSettings(freqLow, freqHigh, thresholdRatio, reduction, attackTime, releaseTime, detectionMs, envelopeMs, sibilanceOpacity, showTooltips)
+    saveSettings(freqLow, freqHigh, thresholdRatio, maxReduction, attackTime, releaseTime, detectionMs, envelopeMs, sibilanceOpacity, showTooltips, rawWaveformOpacity, numFreqBins, numTimeBins, freqLogScaling)
     reaper.Undo_BeginBlock()
     local cnt, processed, totalApply = reaper.CountSelectedMediaItems(0), 0, 0
     
@@ -971,9 +1067,10 @@ local function handleHotkeys()
       local item = reaper.GetSelectedMediaItem(0, i)
       local take = reaper.GetActiveTake(item)
       if take and not reaper.TakeIsMIDI(take) then
-        local sibMap, _ , detWinSize = detectSibilance(take, item, freqLow, freqHigh, thresholdRatio, detectionMs)
+        -- NEW: Use new function name and pass maxReduction
+        local sibMap = detectSibilanceWithReduction(take, item, freqLow, freqHigh, thresholdRatio, maxReduction, detectionMs)
         if sibMap then
-          local ok, t = applyToItem(item, sibMap, detWinSize, reduction, envelopeMs)
+          local ok, t = applyToItem(item, sibMap, detectionWindowSize, maxReduction, envelopeMs)
           if ok then processed = processed + 1; totalApply = totalApply + t end
         end
       end
@@ -1021,8 +1118,20 @@ function PopTheme()
 end
 
 local ctxInit = false
+local lastSelectedItem = nil  -- Track which item was selected
 local function loop()
   PushTheme()
+  -- Check if a NEW item was selected (different from last frame)
+  local currentItem = reaper.GetSelectedMediaItem(0, 0)
+  if currentItem and currentItem ~= lastSelectedItem then
+    -- NEW item selected - calculate RMS once
+    lastSelectedItem = currentItem
+    local take = reaper.GetActiveTake(currentItem)
+    if take and not reaper.TakeIsMIDI(take) then
+      cachedItemRMS_dB = getItemRMS(take, currentItem)
+      debugMsg(string.format("New item loaded - RMS cached: %.1f dB\n", cachedItemRMS_dB))
+    end
+  end
   if not ctxInit then
     refreshWaveform()
     ctxInit = true
@@ -1067,7 +1176,7 @@ local function loop()
         reaper.ImGui_SameLine(ctx, contentWidth - totalButtonWidth)
         
         if reaper.ImGui_Button(ctx, "Apply", 110, 25) then
-          saveSettings(freqLow, freqHigh, thresholdRatio, reduction, attackTime, releaseTime, detectionMs, envelopeMs, sibilanceOpacity, showTooltips, rawWaveformOpacity, numFreqBins, numTimeBins)
+          saveSettings(freqLow, freqHigh, thresholdRatio, maxReduction, attackTime, releaseTime, detectionMs, envelopeMs, sibilanceOpacity, showTooltips, rawWaveformOpacity, numFreqBins, numTimeBins, freqLogScaling)
           reaper.Undo_BeginBlock()
           local cnt, processed, totalApply = reaper.CountSelectedMediaItems(0), 0, 0
           
@@ -1075,9 +1184,9 @@ local function loop()
             local item = reaper.GetSelectedMediaItem(0, i)
             local take = reaper.GetActiveTake(item)
             if take and not reaper.TakeIsMIDI(take) then
-              local sibMap, _ , detWinSize = detectSibilance(take, item, freqLow, freqHigh, thresholdRatio, detectionMs)
+              local sibMap = detectSibilanceWithReduction(take, item, freqLow, freqHigh, thresholdRatio, maxReduction, detectionMs)
               if sibMap then
-                local ok, t = applyToItem(item, sibMap, detWinSize, reduction, envelopeMs)
+                local ok, t = applyToItem(item, sibMap, detectionWindowSize, maxReduction, envelopeMs)
                 if ok then processed = processed + 1; totalApply = totalApply + t end
               end
             end
@@ -1097,7 +1206,7 @@ local function loop()
           freqLow = DEFAULT_FREQ_LOW
           freqHigh = DEFAULT_FREQ_HIGH
           thresholdRatio = DEFAULT_THRESHOLD_RATIO
-          reduction = DEFAULT_REDUCTION
+          maxReduction = DEFAULT_MAX_REDUCTION  -- Changed from reduction
           detectionMs = DEFAULT_DETECTION_MS
           envelopeMs = DEFAULT_ENVELOPE_MS
           sibilanceOpacity = DEFAULT_SIBILANCE_OPACITY
@@ -1212,7 +1321,7 @@ local function loop()
                 reaper.ImGui_Text(ctx, "High Freq (Hz)")
                 reaper.ImGui_Spacing(ctx)
       
-                changed, newVal = reaper.ImGui_SliderDouble(ctx, "##thresholdRatio", thresholdRatio, 0.10, 1.0, "%.2f")
+                changed, newVal = reaper.ImGui_SliderDouble(ctx, "##thresholdRatio", thresholdRatio, 0.300, 0.600, "%.3f")
                 if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_IsMouseClicked(ctx, 1) then
                   thresholdRatio = DEFAULT_THRESHOLD_RATIO
                   statusMessage = "Threshold Ratio reset"
@@ -1229,21 +1338,21 @@ local function loop()
                 reaper.ImGui_Text(ctx, "Threshold Ratio")
                 reaper.ImGui_Spacing(ctx)
                 
-                changed, newVal = reaper.ImGui_SliderDouble(ctx, "##reduction", reduction, -24, 0, "%.1f")
+                changed, newVal = reaper.ImGui_SliderDouble(ctx, "##maxReduction", maxReduction, -24, 0, "%.1f dB")
                 if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_IsMouseClicked(ctx, 1) then
-                  reduction = DEFAULT_REDUCTION
-                  statusMessage = "Reduction reset"
+                  maxReduction = DEFAULT_MAX_REDUCTION
+                  statusMessage = "Max Reduction reset"
                   refreshWaveform()
                 elseif changed then
-                  reduction = newVal
+                  maxReduction = newVal
                 end
                 isActive = reaper.ImGui_IsItemActive(ctx)
-                if sliderWasActive["reduction"] and not isActive then
+                if sliderWasActive["maxReduction"] and not isActive then
                   refreshWaveform()
                 end
-                sliderWasActive["reduction"] = isActive
+                sliderWasActive["maxReduction"] = isActive
                 reaper.ImGui_SameLine(ctx)
-                reaper.ImGui_Text(ctx, "Reduction (dB)")
+                reaper.ImGui_Text(ctx, "Max Reduction (dB)")
       
                 reaper.ImGui_PopItemWidth(ctx)
               reaper.ImGui_EndChild(ctx)
