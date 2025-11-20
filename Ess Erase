@@ -13,7 +13,7 @@ end
 local SCRIPT_NAME = "De-Esser"
 local DEFAULT_FREQ_LOW = 4000
 local DEFAULT_FREQ_HIGH = 14000
-local DEFAULT_THRESHOLD = -20
+local DEFAULT_THRESHOLD_RATIO = 0.40
 local DEFAULT_REDUCTION = -6
 local DEFAULT_ATTACK_TIME = 0.01
 local DEFAULT_RELEASE_TIME = 0.1
@@ -47,7 +47,7 @@ end
 local function loadSettings()
   local freqLow = getExtState("freqLow", DEFAULT_FREQ_LOW)
   local freqHigh = getExtState("freqHigh", DEFAULT_FREQ_HIGH)
-  local threshold = getExtState("threshold", DEFAULT_THRESHOLD)
+  local thresholdRatio = getExtState("thresholdRatio", DEFAULT_THRESHOLD_RATIO)
   local reduction = getExtState("reduction", DEFAULT_REDUCTION)
   local attackTime = getExtState("attackTime", DEFAULT_ATTACK_TIME)
   local releaseTime = getExtState("releaseTime", DEFAULT_RELEASE_TIME)
@@ -64,13 +64,13 @@ local function loadSettings()
   local numTimeBins = getExtState("numTimeBins", DEFAULT_TIME_PRECISION)
   local freqLogScaling = getExtState("freqLogScaling", DEFAULT_FREQ_LOG_SCALING)
   
-  return freqLow, freqHigh, threshold, reduction, attackTime, releaseTime, numBars, minDB, maxDB, curvePower, detectionMs, envelopeMs, sibilanceOpacity, showTooltips, rawWaveformOpacity, numFreqBins, numTimeBins, freqLogScaling
+  return freqLow, freqHigh, thresholdRatio, reduction, attackTime, releaseTime, numBars, minDB, maxDB, curvePower, detectionMs, envelopeMs, sibilanceOpacity, showTooltips, rawWaveformOpacity, numFreqBins, numTimeBins, freqLogScaling
 end
 
-local function saveSettings(freqLow, freqHigh, threshold, reduction, attackTime, releaseTime, detectionMs, envelopeMs, sibilanceOpacity, showTooltips, rawWaveformOpacity, numFreqBins, numTimeBins, freqLogScaling)
+local function saveSettings(freqLow, freqHigh, thresholdRatio, reduction, attackTime, releaseTime, detectionMs, envelopeMs, sibilanceOpacity, showTooltips, rawWaveformOpacity, numFreqBins, numTimeBins, freqLogScaling)
   setExtState("freqLow", freqLow)
   setExtState("freqHigh", freqHigh)
-  setExtState("threshold", threshold)
+  setExtState("thresholdRatio", thresholdRatio)
   setExtState("reduction", reduction)
   setExtState("attackTime", attackTime)
   setExtState("releaseTime", releaseTime)
@@ -84,6 +84,7 @@ local function saveSettings(freqLow, freqHigh, threshold, reduction, attackTime,
   setExtState("freqLogScaling", freqLogScaling)
 end
 
+local cachedItemRMS_dB = 0  -- Cached RMS of current item in dB
 
 -- Conversion
 local function dBToLinear(dB)
@@ -139,8 +140,41 @@ local function get_accessor_bounds(take)
   return aa, aaStart, aaEnd, sr, itemLen
 end
 
+local function getItemRMS(take, item)
+  local aa, aaStart, aaEnd, samplerate, itemLen = get_accessor_bounds(take)
+  if not aa or samplerate <= 0 or itemLen <= 0 then return -150 end
+  
+  local itemVolume = reaper.GetMediaItemInfo_Value(item, "D_VOL")
+  local numChannels = getSourceChannelCount(take)
+  local totalEnergy = 0
+  local totalSamples = 0
+  local chunkSize = math.min(100000, samplerate)
+  local numChunks = math.ceil(itemLen * samplerate / chunkSize)
+  
+  for chunkIdx = 0, numChunks - 1 do
+    local readTime = aaStart + (chunkIdx * chunkSize / samplerate)
+    local buf = getAudioBuffer(take, chunkSize * numChannels * 2)
+    buf.clear()
+    local read = reaper.GetAudioAccessorSamples(aa, samplerate, numChannels, readTime, chunkSize, buf)
+
+    if read > 0 then
+      local t = buf.table()
+      for j = 1, read, numChannels * 2 do
+        local sample = t[j] * itemVolume
+        totalEnergy = totalEnergy + (sample * sample)
+        totalSamples = totalSamples + 1
+      end
+    end
+  end
+  
+  if totalSamples > 0 then
+    return linearTodB(math.sqrt(totalEnergy / totalSamples))
+  end
+  return -150
+end
+
 -- ===== Real FFT-based sibilance detection =====
-local function detectSibilance(take, item, freqLow, freqHigh, threshold, detectionMs)
+local function detectSibilance(take, item, freqLow, freqHigh, thresholdRatio, detectionMs)
   local aa, aaStart, aaEnd, samplerate, itemLen = get_accessor_bounds(take)
   if not aa or samplerate <= 0 or itemLen <= 0 then return nil end
 
@@ -151,8 +185,12 @@ local function detectSibilance(take, item, freqLow, freqHigh, threshold, detecti
   local numWindows = math.ceil(itemLen / windowSize)
   
   local hopSize = math.floor(samplerate * windowSize)
-  local fftSize = 2048  -- Power of 2 for FFT
+  local fftSize = 2048
   local sibilanceMap = {}
+  
+  -- Will accumulate RMS during the main loop
+  local totalEnergy = 0
+  local totalSamples = 0
   
   -- Scan through audio
   for i = 0, numWindows - 1 do
@@ -167,11 +205,16 @@ local function detectSibilance(take, item, freqLow, freqHigh, threshold, detecti
       if read > 0 then
         local t = buf.table()
         
-        -- Create FFT buffer (real FFT needs fftSize samples)
+        -- Accumulate energy for RMS calculation
+        for j = 1, read, numChannels * 2 do
+          local sample = t[j] * itemVolume
+          totalEnergy = totalEnergy + (sample * sample)
+          totalSamples = totalSamples + 1
+        end
+        
         local fftData = reaper.new_array(fftSize)
         fftData.clear()
         
-        -- Copy audio into FFT buffer (interleaved stereo -> mono, convert to real samples)
         local fillIdx = 1
         for j = 1, math.min(numSamples, fftSize) do
           local sample = t[(j - 1) * numChannels + 1] * itemVolume
@@ -179,17 +222,14 @@ local function detectSibilance(take, item, freqLow, freqHigh, threshold, detecti
           fillIdx = j + 1
         end
         
-        -- Perform real FFT
         fftData.fft_real(fftSize, true, 1)
         
-        -- Calculate frequency resolution
         local freqRes = samplerate / fftSize
         local binLow = math.floor(freqLow / freqRes) + 1
         local binHigh = math.floor(freqHigh / freqRes) + 1
         binLow = math.max(1, math.min(binLow, fftSize / 2))
         binHigh = math.max(binLow, math.min(binHigh, fftSize / 2))
         
-        -- Analyze sibilance band (real FFT output: pairs of (real, imag))
         local energy = 0
         for bin = binLow, binHigh do
           local realIdx = bin * 2 - 1
@@ -201,17 +241,24 @@ local function detectSibilance(take, item, freqLow, freqHigh, threshold, detecti
           end
         end
         
-        -- Normalize energy
         local binCount = math.max(1, binHigh - binLow + 1)
         energy = math.sqrt(energy / binCount) / fftSize
         local energyDB = linearTodB(energy)
         
-        local isSibilant = (energyDB > threshold)
+        -- Calculate actual threshold using ratio: RMS / ratio = threshold
+        local actualThreshold = cachedItemRMS_dB / thresholdRatio
+        local isSibilant = (energyDB > actualThreshold)
         sibilanceMap[i + 1] = {energy=energy, isSibilant=isSibilant, energyDB=energyDB}
       else
         sibilanceMap[i + 1] = {energy=0, isSibilant=false, energyDB=-150}
       end
     end
+  end
+  
+  -- Calculate RMS from accumulated energy
+  if totalSamples > 0 then
+    local rmsLinear = math.sqrt(totalEnergy / totalSamples)
+    cachedItemRMS_dB = linearTodB(rmsLinear)
   end
   
   releaseAudioAccessor(take)
@@ -838,7 +885,7 @@ end
 -- ===== GUI State =====
 local ctx = reaper.ImGui_CreateContext('De-Esser')
 
-local freqLow, freqHigh, threshold, reduction, attackTime, releaseTime, numBars, minDB, maxDB, curvePower, detectionMs, envelopeMs, sibilanceOpacity, showTooltips = loadSettings()
+local freqLow, freqHigh, thresholdRatio, reduction, attackTime, releaseTime, numBars, minDB, maxDB, curvePower, detectionMs, envelopeMs, sibilanceOpacity, showTooltips = loadSettings()
 
 local statusMessage = "Ready"
 local waveformData = nil
@@ -898,7 +945,7 @@ local function refreshWaveform()
   if take then itemName = reaper.GetTakeName(take) end
 
   detectionWindowSize = math.max(0.01, (detectionMs or 10) / 1000)
-  sibilanceMap, _ , _ = detectSibilance(take, item, freqLow, freqHigh, threshold, detectionMs)
+  sibilanceMap, _ , _ = detectSibilance(take, item, freqLow, freqHigh, thresholdRatio, detectionMs)
 
   rawWaveformData = getRawWaveform(item, numBars)
   waveformData = getWaveformWithSibilance(item, numBars, sibilanceMap, detectionWindowSize, reduction)
@@ -916,7 +963,7 @@ end
 
 local function handleHotkeys()
   if reaper.ImGui_IsKeyPressed(ctx, reaper.ImGui_Key_Enter()) then
-    saveSettings(freqLow, freqHigh, threshold, reduction, attackTime, releaseTime, detectionMs, envelopeMs, sibilanceOpacity, showTooltips)
+    saveSettings(freqLow, freqHigh, thresholdRatio, reduction, attackTime, releaseTime, detectionMs, envelopeMs, sibilanceOpacity, showTooltips)
     reaper.Undo_BeginBlock()
     local cnt, processed, totalApply = reaper.CountSelectedMediaItems(0), 0, 0
     
@@ -924,7 +971,7 @@ local function handleHotkeys()
       local item = reaper.GetSelectedMediaItem(0, i)
       local take = reaper.GetActiveTake(item)
       if take and not reaper.TakeIsMIDI(take) then
-        local sibMap, _ , detWinSize = detectSibilance(take, item, freqLow, freqHigh, threshold, detectionMs)
+        local sibMap, _ , detWinSize = detectSibilance(take, item, freqLow, freqHigh, thresholdRatio, detectionMs)
         if sibMap then
           local ok, t = applyToItem(item, sibMap, detWinSize, reduction, envelopeMs)
           if ok then processed = processed + 1; totalApply = totalApply + t end
@@ -1020,7 +1067,7 @@ local function loop()
         reaper.ImGui_SameLine(ctx, contentWidth - totalButtonWidth)
         
         if reaper.ImGui_Button(ctx, "Apply", 110, 25) then
-          saveSettings(freqLow, freqHigh, threshold, reduction, attackTime, releaseTime, detectionMs, envelopeMs, sibilanceOpacity, showTooltips, rawWaveformOpacity, numFreqBins, numTimeBins)
+          saveSettings(freqLow, freqHigh, thresholdRatio, reduction, attackTime, releaseTime, detectionMs, envelopeMs, sibilanceOpacity, showTooltips, rawWaveformOpacity, numFreqBins, numTimeBins)
           reaper.Undo_BeginBlock()
           local cnt, processed, totalApply = reaper.CountSelectedMediaItems(0), 0, 0
           
@@ -1028,7 +1075,7 @@ local function loop()
             local item = reaper.GetSelectedMediaItem(0, i)
             local take = reaper.GetActiveTake(item)
             if take and not reaper.TakeIsMIDI(take) then
-              local sibMap, _ , detWinSize = detectSibilance(take, item, freqLow, freqHigh, threshold, detectionMs)
+              local sibMap, _ , detWinSize = detectSibilance(take, item, freqLow, freqHigh, thresholdRatio, detectionMs)
               if sibMap then
                 local ok, t = applyToItem(item, sibMap, detWinSize, reduction, envelopeMs)
                 if ok then processed = processed + 1; totalApply = totalApply + t end
@@ -1049,7 +1096,7 @@ local function loop()
         if reaper.ImGui_Button(ctx, "Reset", 100, 25) then
           freqLow = DEFAULT_FREQ_LOW
           freqHigh = DEFAULT_FREQ_HIGH
-          threshold = DEFAULT_THRESHOLD
+          thresholdRatio = DEFAULT_THRESHOLD_RATIO
           reduction = DEFAULT_REDUCTION
           detectionMs = DEFAULT_DETECTION_MS
           envelopeMs = DEFAULT_ENVELOPE_MS
@@ -1165,21 +1212,21 @@ local function loop()
                 reaper.ImGui_Text(ctx, "High Freq (Hz)")
                 reaper.ImGui_Spacing(ctx)
       
-                changed, newVal = reaper.ImGui_SliderDouble(ctx, "##threshold", threshold, -80, 0, "%.1f")
+                changed, newVal = reaper.ImGui_SliderDouble(ctx, "##thresholdRatio", thresholdRatio, 0.10, 1.0, "%.2f")
                 if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_IsMouseClicked(ctx, 1) then
-                  threshold = DEFAULT_THRESHOLD
-                  statusMessage = "Threshold reset"
+                  thresholdRatio = DEFAULT_THRESHOLD_RATIO
+                  statusMessage = "Threshold Ratio reset"
                   refreshWaveform()
                 elseif changed then
-                  threshold = newVal
+                  thresholdRatio = newVal
                 end
                 isActive = reaper.ImGui_IsItemActive(ctx)
-                if sliderWasActive["threshold"] and not isActive then
+                if sliderWasActive["thresholdRatio"] and not isActive then
                   refreshWaveform()
                 end
-                sliderWasActive["threshold"] = isActive
+                sliderWasActive["thresholdRatio"] = isActive
                 reaper.ImGui_SameLine(ctx)
-                reaper.ImGui_Text(ctx, "Threshold (dB)")
+                reaper.ImGui_Text(ctx, "Threshold Ratio")
                 reaper.ImGui_Spacing(ctx)
                 
                 changed, newVal = reaper.ImGui_SliderDouble(ctx, "##reduction", reduction, -24, 0, "%.1f")
