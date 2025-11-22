@@ -21,7 +21,7 @@ local DEFAULT_NUM_BARS = 10000
 local DEFAULT_MIN_DB = -150
 local DEFAULT_MAX_DB = -11
 local DEFAULT_CURVE_POWER = 14.0
-local DEFAULT_DETECTION_MS = 10
+local DEFAULT_DETECTION_MS = 25
 local DEFAULT_ENVELOPE_MS = 1
 local DEFAULT_SIBILANCE_OPACITY = 0
 local DEFAULT_FREQ_LOG_SCALING = 4.0
@@ -142,7 +142,7 @@ local function get_accessor_bounds(take)
   return aa, aaStart, aaEnd, sr, itemLen
 end
 
-local function getItemRMS(take, item)
+local function getItemRMS(take, item, detectionMs)
   local aa, aaStart, aaEnd, samplerate, itemLen = get_accessor_bounds(take)
   if not aa or samplerate <= 0 or itemLen <= 0 then return -150 end
   
@@ -152,7 +152,7 @@ local function getItemRMS(take, item)
   local totalSamples = 0
   
   -- Use detection windows like sibilance detection does (faster sampling)
-  local windowSize = 0.01  -- 10ms windows, same as detection
+  local windowSize = detectionMs /1000  -- 10ms windows, same as detection
   local numWindows = math.ceil(itemLen / windowSize)
   local hopSize = math.floor(samplerate * windowSize)
   
@@ -979,7 +979,7 @@ end
 -- ===== GUI State =====
 local ctx = reaper.ImGui_CreateContext('De-Esser')
 
-local freqLow, freqHigh, thresholdRatio, maxReduction, attackTime, releaseTime, numBars, minDB, maxDB, curvePower, detectionMs, envelopeMs, sibilanceOpacity, showTooltips = loadSettings()
+local freqLow, freqHigh, thresholdRatio, maxReduction, attackTime, releaseTime, numBars, minDB, maxDB, curvePower, detectionMs, envelopeMs, sibilanceOpacity, showTooltips, rawWaveformOpacity, numFreqBins, numTimeBins, freqLogScaling = loadSettings()
 
 local statusMessage = "Ready"
 local waveformData = nil
@@ -1002,11 +1002,10 @@ local tabState = {
 }
 
 local sliderWasActive = {}
-local numFreqBins = 256  -- Add to your loadSettings/saveSettings
-local numTimeBins = 512  -- Add to your loadSettings/saveSettings
---local DEFAULT_RAW_WAVEFORM_OPACITY = 30
-local rawWaveformOpacity = DEFAULT_RAW_WAVEFORM_OPACITY
-local freqLogScaling = 4.0
+--local numFreqBins = 256  -- Add to your loadSettings/saveSettings
+--local numTimeBins = 512  -- Add to your loadSettings/saveSettings
+--local rawWaveformOpacity = DEFAULT_RAW_WAVEFORM_OPACITY
+--local freqLogScaling = 4.0
 
 local function getPinnedWaveformRect(plotHeight)
   local winPosX, winPosY = reaper.ImGui_GetWindowPos(ctx)
@@ -1108,7 +1107,7 @@ function PushTheme()
   reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_FrameBgHovered(), 0x54555666)
   reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_FrameBgActive(), 0x4296FA66)
   reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_SliderGrab(), 0x4080FFFF)
-  reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_SliderGrabActive(), 0xFFFFFFFF)
+  reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_SliderGrabActive(), 0x0000008A)
   reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_ButtonActive(), 0x4080FFFF)
 end
 
@@ -1128,7 +1127,7 @@ local function loop()
     lastSelectedItem = currentItem
     local take = reaper.GetActiveTake(currentItem)
     if take and not reaper.TakeIsMIDI(take) then
-      cachedItemRMS_dB = getItemRMS(take, currentItem)
+      cachedItemRMS_dB = getItemRMS(take, currentItem, detectionMs)
       debugMsg(string.format("New item loaded - RMS cached: %.1f dB\n", cachedItemRMS_dB))
     end
   end
@@ -1303,24 +1302,6 @@ local function loop()
                 reaper.ImGui_Text(ctx, "Low Freq (Hz)")
                 reaper.ImGui_Spacing(ctx)
       
-                changed, newVal = reaper.ImGui_SliderInt(ctx, "##freqHigh", freqHigh, 1000, 20000)
-                if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_IsMouseClicked(ctx, 1) then
-                  freqHigh = DEFAULT_FREQ_HIGH
-                  statusMessage = "Freq High reset"
-                  refreshWaveform()
-                elseif changed then
-                  freqHigh = newVal
-                  if freqLow >= freqHigh then freqLow = freqHigh - 1000 end
-                end
-                isActive = reaper.ImGui_IsItemActive(ctx)
-                if sliderWasActive["freqHigh"] and not isActive then
-                  refreshWaveform()
-                end
-                sliderWasActive["freqHigh"] = isActive
-                reaper.ImGui_SameLine(ctx)
-                reaper.ImGui_Text(ctx, "High Freq (Hz)")
-                reaper.ImGui_Spacing(ctx)
-      
                 changed, newVal = reaper.ImGui_SliderDouble(ctx, "##thresholdRatio", thresholdRatio, 0.300, 0.600, "%.3f")
                 if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_IsMouseClicked(ctx, 1) then
                   thresholdRatio = DEFAULT_THRESHOLD_RATIO
@@ -1338,21 +1319,23 @@ local function loop()
                 reaper.ImGui_Text(ctx, "Threshold Ratio")
                 reaper.ImGui_Spacing(ctx)
                 
-                changed, newVal = reaper.ImGui_SliderDouble(ctx, "##maxReduction", maxReduction, -24, 0, "%.1f dB")
+                local changed, newVal = reaper.ImGui_SliderDouble(ctx, "##detectionMs", detectionMs, 10, 40, "%.0f")
                 if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_IsMouseClicked(ctx, 1) then
-                  maxReduction = DEFAULT_MAX_REDUCTION
-                  statusMessage = "Max Reduction reset"
+                  detectionMs = DEFAULT_DETECTION_MS
+                  statusMessage = "Detection reset"
                   refreshWaveform()
                 elseif changed then
-                  maxReduction = newVal
+                  detectionMs = newVal
                 end
                 isActive = reaper.ImGui_IsItemActive(ctx)
-                if sliderWasActive["maxReduction"] and not isActive then
+                if sliderWasActive["detectionMs"] and not isActive then
                   refreshWaveform()
                 end
-                sliderWasActive["maxReduction"] = isActive
+                sliderWasActive["detectionMs"] = isActive
                 reaper.ImGui_SameLine(ctx)
-                reaper.ImGui_Text(ctx, "Max Reduction (dB)")
+                reaper.ImGui_Text(ctx, "Detection (ms)")
+                reaper.ImGui_Spacing(ctx)
+                
       
                 reaper.ImGui_PopItemWidth(ctx)
               reaper.ImGui_EndChild(ctx)
@@ -1361,23 +1344,40 @@ local function loop()
       
               reaper.ImGui_BeginChild(ctx, "controls_right_col", colWidth, 0, reaper.ImGui_WindowFlags_NoScrollbar())
                 reaper.ImGui_PushItemWidth(ctx, colWidth * 0.60)
-      
-                local changed2, newVal2 = reaper.ImGui_SliderDouble(ctx, "##detectionMs", detectionMs, 1, 50, "%.0f")
+                
+                changed2, newVal2 = reaper.ImGui_SliderInt(ctx, "##freqHigh", freqHigh, 1000, 20000)
                 if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_IsMouseClicked(ctx, 1) then
-                  detectionMs = DEFAULT_DETECTION_MS
-                  statusMessage = "Detection reset"
+                  freqHigh = DEFAULT_FREQ_HIGH
+                  statusMessage = "Freq High reset"
                   refreshWaveform()
                 elseif changed2 then
-                  detectionMs = newVal2
+                  freqHigh = newVal2
+                  if freqLow >= freqHigh then freqLow = freqHigh - 1000 end
                 end
                 isActive2 = reaper.ImGui_IsItemActive(ctx)
-                if sliderWasActive["detectionMs"] and not isActive2 then
+                if sliderWasActive["freqHigh"] and not isActive2 then
                   refreshWaveform()
                 end
-                sliderWasActive["detectionMs"] = isActive2
+                sliderWasActive["freqHigh"] = isActive2
                 reaper.ImGui_SameLine(ctx)
-                reaper.ImGui_Text(ctx, "Detection (ms)")
+                reaper.ImGui_Text(ctx, "High Freq (Hz)")
                 reaper.ImGui_Spacing(ctx)
+      
+                changed2, newVal2 = reaper.ImGui_SliderDouble(ctx, "##maxReduction", maxReduction, -24, 0, "%.1f dB")
+                if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_IsMouseClicked(ctx, 1) then
+                  maxReduction = DEFAULT_MAX_REDUCTION
+                  statusMessage = "Max Reduction reset"
+                  refreshWaveform()
+                elseif changed2 then
+                  maxReduction = newVal2
+                end
+                isActive2 = reaper.ImGui_IsItemActive(ctx)
+                if sliderWasActive["maxReduction"] and not isActive2 then
+                  refreshWaveform()
+                end
+                sliderWasActive["maxReduction"] = isActive2
+                reaper.ImGui_SameLine(ctx)
+                reaper.ImGui_Text(ctx, "Max Reduction (dB)")
       
                 changed2, newVal2 = reaper.ImGui_SliderDouble(ctx, "##envelopeMs", envelopeMs, 0.1, 5, "%.1f")
                 if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_IsMouseClicked(ctx, 1) then
