@@ -1216,7 +1216,7 @@ function PushTheme()
   reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_FrameBgHovered(), 0x54555666)
   reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_FrameBgActive(), 0x4296FA66)
   reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_SliderGrab(), 0x4080FFFF)
-  reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_SliderGrabActive(), 0xFFFFFFFF)
+  reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_SliderGrabActive(), 0x0000008A)
   reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_ButtonActive(), 0x4080FFFF)
 end
 
