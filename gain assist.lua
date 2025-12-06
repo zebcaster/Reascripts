@@ -69,7 +69,7 @@ local function loadSettings()
   local gateHoldTime = getExtState("gateHoldTime", DEFAULT_GATE_HOLD_TIME)
   local gateReduction = getExtState("gateReduction", DEFAULT_GATE_REDUCTION)
   local gateOnsetTime = getExtState("gateOnsetTime", DEFAULT_GATE_ONSET_TIME)
-  local gateOverlayOpacity = tonumber(getExtState("gateOverlayOpacity", DEFAULT_GATE_OVERLAY_OPACITY)) or DEFAULT_GATE_OVERLAY_OPACITY
+  local gateOverlayOpacity = getExtState("gateOverlayOpacity", DEFAULT_GATE_OVERLAY_OPACITY)
   return peakCeiling, correctionStrength, separationSensitivity, trim, preLimitBoost, numBars, minDB, maxDB, curvePower, resolutionMs, reducePoints, showDisplaySettings, rawWaveformOpacity, showTooltips, gateEnabled, gateThreshold, gateHoldTime, gateReduction, gateOnsetTime, gateOverlayOpacity
 end
 
@@ -604,8 +604,8 @@ local function drawPlayhead(drawList, item, x, y, w, h, zoomLevel, zoomCenter, t
   end
 end
 
--- ===== UPDATE drawGateOverlay() function with fade zone visualization =====
-local function drawGateOverlay(drawList, gatePoints, adjustedData, item, x, y, width, height, zoomLevel, zoomCenter, gateOpacity)
+-- FIXED: UPDATE drawGateOverlay() function with proper fade zone visualization
+local function drawGateOverlay(drawList, gatePoints, adjustedData, item, x, y, width, height, zoomLevel, zoomCenter, gateOpacity, gateReduction)
   if not gatePoints or #gatePoints == 0 then return end
   if not adjustedData or #adjustedData == 0 then return end
   
@@ -632,8 +632,13 @@ local function drawGateOverlay(drawList, gatePoints, adjustedData, item, x, y, w
   local fadeOpacityHex = math.floor(gateOpacity * 0.5 * 2.55)
   local fadeOverlayColor = 0xFF000000 + fadeOpacityHex
   
-  -- We need to track the previous reduction to detect transitions
-  local prevReduction = 1.0
+  -- Convert the actual gateReduction parameter to linear for proper fade zone detection
+  local reductionLin = dBToLinear(gateReduction)
+  
+   -- Draw gate reduction regions
+  local fadeZoneCount = 0
+  local fullReductionCount = 0
+  
   
   -- Draw gate reduction regions
   for i = startSample, endSample do
@@ -652,9 +657,9 @@ local function drawGateOverlay(drawList, gatePoints, adjustedData, item, x, y, w
       
       -- Only draw overlay where gate is actively reducing (not at full 1.0)
       if reduction < 0.99 then
-        -- Check if this is a fade zone (reduction between 0 and 1, not at the extremes)
+        local reductionLin = dBToLinear(gateReduction)
         -- Fade zones are where reduction is strictly between fully reduced and fully open
-        local reductionLin = dBToLinear(-60)  -- Default gate reduction, adjust if needed
+        -- Use a small epsilon (0.01) to distinguish fade zones from full reduction
         local isFadeZone = reduction > (reductionLin + 0.01) and reduction < 0.99
         
         local colorToUse = isFadeZone and fadeOverlayColor or gateOverlayColor
@@ -918,6 +923,7 @@ local sliderDoubleClickTimes = {}
 local sliderLastValue = {}
 
 local peakCeiling, correctionStrength, separationSensitivity, trim, preLimitBoost, numBars, minDB, maxDB, curvePower, resolutionMs, reducePoints, showDisplaySettings, rawWaveformOpacity, showTooltips, gateEnabled, gateThreshold, gateHoldTime, gateReduction, gateOnsetTime, gateOverlayOpacity = loadSettings()
+
 local statusMessage = "Ready"
 local waveformData, rawWaveformData = nil, nil
 local gatePoints = nil
@@ -1359,7 +1365,7 @@ local function loop()
               debugMsg(string.format("  Phrase %d: %.3f - %.3f\n", idx, ph.startTime, ph.endTime))
             end
           end
-          saveSettings(peakCeiling, correctionStrength, separationSensitivity, trim, preLimitBoost, resolutionMs, true, rawWaveformOpacity, showTooltips, gateEnabled, gateThreshold, gateHoldTime, gateReduction, gateOnsetTime)
+          saveSettings(peakCeiling, correctionStrength, separationSensitivity, trim, preLimitBoost, resolutionMs, true, rawWaveformOpacity, showTooltips, gateEnabled, gateThreshold, gateHoldTime, gateReduction, gateOnsetTime, gateOverlayOpacity)
           reaper.Undo_BeginBlock()
           local cnt, processed, totalApply = reaper.CountSelectedMediaItems(0), 0, 0
           local currentItem = reaper.GetSelectedMediaItem(0, 0)
@@ -2071,16 +2077,17 @@ local function loop()
         local fg = reaper.ImGui_GetForegroundDrawList(ctx)
         reaper.ImGui_DrawList_AddRectFilled(fg, x, y, x + w, y + h, 0x1A1A1AFF)
         drawWaveform(fg, rawWaveformData, waveformData, x, y, w, h, minDB, maxDB, curvePower, zoomLevel, zoomCenter, rawWaveformOpacity)
+       
+       -- Draw phrase markers on top (so they're not red-tinted)
+       drawPhraseMarkers(fg, phrases, waveformData, x, y, w, h, zoomLevel, zoomCenter, startSample, isDraggingMarker, draggedMarkerIdx, draggedMarkerX, hoverMarkerIdx, markersToDelete)
         
         -- Draw gate overlay (red semi-transparent background where gate is reducing)
        local item = reaper.GetSelectedMediaItem(0, 0)
        if item and gateEnabled and gatePoints then
-         drawGateOverlay(fg, gatePoints, waveformData, item, x, y, w, h, zoomLevel, zoomCenter, gateOverlayOpacity)
+         drawGateOverlay(fg, gatePoints, waveformData, item, x, y, w, h, zoomLevel, zoomCenter, gateOverlayOpacity, gateReduction)
        end
        
-        -- Draw phrase markers on top (so they're not red-tinted)
-        drawPhraseMarkers(fg, phrases, waveformData, x, y, w, h, zoomLevel, zoomCenter, startSample, isDraggingMarker, draggedMarkerIdx, draggedMarkerX, hoverMarkerIdx, markersToDelete)
-        -- Draw playhead line
+                -- Draw playhead line
         drawPlayhead(fg, item, x, y, w, h, zoomLevel, zoomCenter, totalSamples, startSample, visibleSamples)  
           
           
